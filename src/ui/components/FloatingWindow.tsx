@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { X, Minus, Maximize2, Minimize2 } from 'lucide-react';
+import { X, Minus, Maximize2, Minimize2, LayoutGrid } from 'lucide-react';
 
 export interface FloatingWindowProps {
   id: string;
@@ -10,6 +10,8 @@ export interface FloatingWindowProps {
   minimised?: boolean;
   /** When true the window gets a yellow/gold accent border to indicate selection. */
   highlighted?: boolean;
+  /** If provided, a mosaic/grid button is shown in the title bar. */
+  onMosaic?: () => void;
   onClose: (id: string) => void;
   onFocus: (id: string) => void;
   onMinimise: (id: string) => void;
@@ -22,7 +24,7 @@ const TITLE_H = 26;
 
 export const FloatingWindow: React.FC<FloatingWindowProps> = ({
   id, title, initialRect, zIndex, minimised, highlighted,
-  onClose, onFocus, onMinimise, children,
+  onMosaic, onClose, onFocus, onMinimise, children,
 }) => {
   const [rect, setRect] = useState(() => initialRect ?? { x: 80, y: 80, w: 420, h: 320 });
   const [maximised, setMaximised] = useState(false);
@@ -131,6 +133,7 @@ export const FloatingWindow: React.FC<FloatingWindowProps> = ({
         position: 'absolute',
         left: rect.x, top: rect.y, width: rect.w, height: rect.h,
         zIndex,
+        pointerEvents: 'auto',
         display: 'flex', flexDirection: 'column',
         background: '#1e1e1e',
         border: highlighted ? '1.5px solid #d4aa30' : '1px solid #444',
@@ -164,6 +167,14 @@ export const FloatingWindow: React.FC<FloatingWindowProps> = ({
         }}>
           {title}
         </span>
+
+        {/* Mosaic */}
+        {onMosaic && (
+          <button onClick={onMosaic} title="Camera Mosaic"
+            style={btnStyle}
+            onMouseEnter={e => hoverBtn(e, true)} onMouseLeave={e => hoverBtn(e, false)}
+          ><LayoutGrid size={11} /></button>
+        )}
 
         {/* Minimise */}
         <button onClick={() => onMinimise(id)} title="Minimise"

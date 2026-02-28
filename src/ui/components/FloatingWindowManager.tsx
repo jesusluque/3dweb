@@ -1,5 +1,6 @@
 import React from 'react';
 import { FloatingWindow } from './FloatingWindow';
+import { CameraMosaicOverlay } from './CameraMosaicOverlay';
 import { CameraViewPanel } from '../panels/CameraViewPanel';
 import { useAppStore } from '../store/useAppStore';
 import { Camera } from 'lucide-react';
@@ -17,6 +18,8 @@ export const FloatingWindowManager: React.FC = () => {
   const focusFloatingWindow    = useAppStore(s => s.focusFloatingWindow);
   const minimiseFloatingWindow = useAppStore(s => s.minimiseFloatingWindow);
   const restoreFloatingWindow  = useAppStore(s => s.restoreFloatingWindow);
+  const cameraMosaicMode        = useAppStore(s => s.cameraMosaicMode);
+  const toggleCameraMosaic      = useAppStore(s => s.toggleCameraMosaic);
   const selectedNodes          = useAppStore(s => s.selectedNodes);
 
   // Build a set of selected camera UUIDs for quick lookup
@@ -28,7 +31,24 @@ export const FloatingWindowManager: React.FC = () => {
   const visible   = floatingWindows.filter(w => !w.minimised);
 
   return (
-    <>
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 90 }}>
+      {/* Mosaic window */}
+      {cameraMosaicMode && (
+        <FloatingWindow
+          id="__mosaic__"
+          title="Camera Mosaic"
+          initialRect={{ x: 60, y: 40, w: 700, h: 500 }}
+          zIndex={600}
+          minimised={false}
+          highlighted={false}
+          onClose={() => toggleCameraMosaic()}
+          onFocus={() => {}}
+          onMinimise={() => toggleCameraMosaic()}
+        >
+          <CameraMosaicOverlay />
+        </FloatingWindow>
+      )}
+
       {/* Floating windows layer */}
       {visible.map(win => {
         const camUuid = win.payload?.cameraUuid as string | undefined;
@@ -42,6 +62,7 @@ export const FloatingWindowManager: React.FC = () => {
           zIndex={100 + win.zOrder}
           minimised={false}
           highlighted={isHighlighted}
+          onMosaic={win.type === 'camera_view' ? toggleCameraMosaic : undefined}
           onClose={closeFloatingWindow}
           onFocus={focusFloatingWindow}
           onMinimise={minimiseFloatingWindow}
@@ -89,6 +110,6 @@ export const FloatingWindowManager: React.FC = () => {
           ))}
         </div>
       )}
-    </>
+    </div>
   );
 };

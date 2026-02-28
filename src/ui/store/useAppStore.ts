@@ -51,6 +51,8 @@ interface AppState {
   leadSelection: DAGNode | null;
   sceneVersion: number;
   floatingWindows: FloatingWindowState[];
+  /** When true, all camera windows are shown in a single mosaic grid overlay. */
+  cameraMosaicMode: boolean;
   viewportSettings: ViewportSettings;
   /** File handle returned by showSaveFilePicker (if supported). */
   currentFileHandle: FileSystemFileHandle | null;
@@ -68,6 +70,8 @@ interface AppState {
   focusFloatingWindow: (id: string) => void;
   minimiseFloatingWindow: (id: string) => void;
   restoreFloatingWindow: (id: string) => void;
+  /** Toggle the mosaic grid overlay for all camera views. */
+  toggleCameraMosaic: () => void;
   /** Scene file operations */
   newScene: () => void;
   saveScene: () => Promise<void>;
@@ -82,6 +86,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   leadSelection: null,
   sceneVersion: 0,
   floatingWindows: [],
+  cameraMosaicMode: false,
   viewportSettings: { ...DEFAULT_VIEWPORT_SETTINGS },
   currentFileHandle: null,
   currentFileName: 'untitled',
@@ -163,6 +168,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         ),
       };
     });
+  },
+
+  toggleCameraMosaic: () => {
+    set(s => ({ cameraMosaicMode: !s.cameraMosaicMode }));
   },
 
   /* ════════════════════════════════════════════════════════════════════════

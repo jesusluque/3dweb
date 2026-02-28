@@ -185,6 +185,8 @@ export const MenuBar: React.FC = () => {
   const closeFloatingWindow  = useAppStore(s => s.closeFloatingWindow);
   const restoreFloatingWindow = useAppStore(s => s.restoreFloatingWindow);
   const focusFloatingWindow   = useAppStore(s => s.focusFloatingWindow);
+  const cameraMosaicMode  = useAppStore(s => s.cameraMosaicMode);
+  const toggleCameraMosaic = useAppStore(s => s.toggleCameraMosaic);
   const sceneVersion      = useAppStore(s => s.sceneVersion); void sceneVersion;
   const currentFileName   = useAppStore(s => s.currentFileName);
   const newScene          = useAppStore(s => s.newScene);
@@ -349,6 +351,7 @@ export const MenuBar: React.FC = () => {
             action: () => { if (w.minimised) restoreFloatingWindow(w.id); focusFloatingWindow(w.id); },
           } as MenuItem)),
           { divider: true } as MenuItem,
+          { label: cameraMosaicMode ? '✓ Camera Mosaic' : 'Camera Mosaic', action: () => toggleCameraMosaic() } as MenuItem,
           { label: 'Close All Camera Views', action: () => { floatingWindows.forEach(w => closeFloatingWindow(w.id)); } } as MenuItem,
         ] : []),
       ],
