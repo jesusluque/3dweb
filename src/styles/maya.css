@@ -1,0 +1,221 @@
+/* ======================================================
+   Maya-inspired dark theme
+   ====================================================== */
+
+:root {
+  --maya-bg:           #3e3e3e;
+  --maya-bg-dark:      #2a2a2a;
+  --maya-bg-panel:     #444444;
+  --maya-bg-raised:    #505050;
+  --maya-bg-input:     #383838;
+  --maya-tab-strip:    #3a3a3a;
+  --maya-tab-active:   #4c4c4c;
+  --maya-tab-hover:    #4a4a4a;
+  --maya-border:       #272727;
+  --maya-border-light: #5a5a5a;
+  --maya-accent:       #5285a6;
+  --maya-accent-hover: #6399c0;
+  --maya-text:         #c8c8c8;
+  --maya-text-muted:   #888888;
+  --maya-text-dim:     #555555;
+  --maya-red:          #f48771;
+  --maya-yellow:       #cca700;
+  --maya-green:        #7ec89c;
+  --maya-splitter:     #222222;
+  --maya-toolbar-h:    32px;
+  --maya-menubar-h:    28px;
+}
+
+/* ---- FlexLayout overrides ---- */
+
+.flexlayout__layout {
+  background: var(--maya-bg-dark) !important;
+}
+
+.flexlayout__tabset {
+  background: var(--maya-bg-panel) !important;
+  border: none !important;
+}
+
+.flexlayout__tabset_header {
+  background: var(--maya-tab-strip) !important;
+  border-bottom: 1px solid var(--maya-border) !important;
+  color: var(--maya-text) !important;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 11px !important;
+}
+
+.flexlayout__tabset_tabbar_outer {
+  background: var(--maya-tab-strip) !important;
+}
+
+.flexlayout__tabset_tabbar_inner_tab_container {
+  border-bottom: none !important;
+}
+
+.flexlayout__tab_button {
+  background: var(--maya-tab-strip) !important;
+  color: var(--maya-text-muted) !important;
+  border-right: 1px solid var(--maya-border) !important;
+  border-bottom: 2px solid transparent !important;
+  font-size: 11px !important;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  padding: 0 12px !important;
+  transition: color 0.1s, background 0.1s !important;
+}
+
+.flexlayout__tab_button:hover {
+  background: var(--maya-tab-hover) !important;
+  color: var(--maya-text) !important;
+}
+
+.flexlayout__tab_button--selected {
+  background: var(--maya-tab-active) !important;
+  color: var(--maya-text) !important;
+  border-bottom: 2px solid var(--maya-accent) !important;
+}
+
+.flexlayout__tab_button_content {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Tab floating/close/maximize icons */
+.flexlayout__tab_button_trailing {
+  opacity: 0.6;
+  transition: opacity 0.1s;
+}
+.flexlayout__tab_button_trailing:hover {
+  opacity: 1 !important;
+}
+
+.flexlayout__tab {
+  background: var(--maya-bg-panel) !important;
+  color: var(--maya-text) !important;
+  border: none !important;
+  overflow: hidden;
+}
+
+.flexlayout__tabset_content {
+  background: var(--maya-bg-panel) !important;
+}
+
+/* Splitter / dividers */
+.flexlayout__splitter {
+  background: var(--maya-splitter) !important;
+}
+.flexlayout__splitter:hover,
+.flexlayout__splitter_drag {
+  background: var(--maya-accent) !important;
+}
+
+/* Floating window */
+.flexlayout__floating_window {
+  background: var(--maya-bg-panel) !important;
+  border: 1px solid var(--maya-border-light) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6) !important;
+}
+
+.flexlayout__floating_window_titlebar {
+  background: var(--maya-tab-strip) !important;
+  color: var(--maya-text) !important;
+  border-bottom: 1px solid var(--maya-border) !important;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 11px;
+}
+
+/* Tabset maximise state */
+.flexlayout__tabset--maximized .flexlayout__tab_button--selected {
+  border-bottom-color: var(--maya-yellow) !important;
+}
+
+/* Popup menu (right-click tab) */
+.flexlayout__popup_menu {
+  background: var(--maya-bg-dark) !important;
+  border: 1px solid var(--maya-border-light) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
+  font-size: 12px !important;
+  color: var(--maya-text) !important;
+}
+.flexlayout__popup_menu_item:hover {
+  background: var(--maya-accent) !important;
+  color: white !important;
+}
+
+/* Drag feedback */
+.flexlayout__outline_rect {
+  border: 2px solid var(--maya-accent) !important;
+  background: rgba(82, 133, 166, 0.15) !important;
+}
+
+/* Tabset maximize / restore button */
+.flexlayout__tabset_header_content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.flexlayout__tab_toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+}
+
+.flexlayout__tab_toolbar_button {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: 2px !important;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.1s, border-color 0.1s;
+}
+
+.flexlayout__tab_toolbar_button:hover {
+  opacity: 1 !important;
+  border-color: var(--maya-border-light) !important;
+  background: var(--maya-bg-raised) !important;
+}
+
+/* Maximized tabset glow accent on tab strip */
+.flexlayout__tabset--maximized .flexlayout__tabset_header {
+  border-bottom: 1px solid var(--maya-yellow) !important;
+}
+
+/* Tab drag overlay */
+.flexlayout__tabset_tab_divider {
+  background: var(--maya-accent) !important;
+  opacity: 0.7;
+}
+
+/* ---- Scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--maya-border-light) var(--maya-bg-dark);
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--maya-bg-dark); }
+::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--maya-accent); }
+
+/* ---- Number inputs ---- */
+input[type="number"] {
+  -moz-appearance: textfield;
+  background: var(--maya-bg-input) !important;
+  color: var(--maya-text) !important;
+  border: 1px solid var(--maya-border) !important;
+  font-family: "Consolas","Menlo", monospace;
+  font-size: 11px;
+}
+input[type="number"]:focus {
+  outline: none;
+  border-color: var(--maya-accent) !important;
+}
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
