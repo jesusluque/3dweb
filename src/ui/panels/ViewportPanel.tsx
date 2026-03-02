@@ -182,6 +182,13 @@ export const ViewportPanel: React.FC = () => {
       vm.createCamera();
       markSceneDirty();
     };
+    const onCreateLight = (e: Event) => {
+      vm.createLight((e as CustomEvent<string>).detail as any);
+      markSceneDirty();
+    };
+    const onImportGltf = () => {
+      vm.importGltf().then(() => markSceneDirty());
+    };
     const onLookThroughCamera = (e: Event) => {
       const uuid = (e as CustomEvent<string | null>).detail;
       vm.lookThroughCamera(uuid);
@@ -209,6 +216,8 @@ export const ViewportPanel: React.FC = () => {
     viewportBus.addEventListener('setOutlineWidth',   (e: Event) => vm.setOutlineWidth((e as CustomEvent<number>).detail));
     sceneBus   .addEventListener('createPrimitive',   onCreate);
     sceneBus   .addEventListener('createCamera',      onCreateCamera);
+    sceneBus   .addEventListener('createLight',       onCreateLight);
+    sceneBus   .addEventListener('importGltf',        onImportGltf);
     sceneBus   .addEventListener('groupSelected',      onGroupSelected);
     sceneBus   .addEventListener('ungroupSelected',    onUngroupSelected);
     sceneBus   .addEventListener('reparentNode',       onReparentNode);
@@ -230,6 +239,8 @@ export const ViewportPanel: React.FC = () => {
       // outline listeners are anonymous — they auto-clean when vm is disposed
       sceneBus   .removeEventListener('createPrimitive',   onCreate);
       sceneBus   .removeEventListener('createCamera',      onCreateCamera);
+      sceneBus   .removeEventListener('createLight',       onCreateLight);
+      sceneBus   .removeEventListener('importGltf',        onImportGltf);
       sceneBus   .removeEventListener('groupSelected',     onGroupSelected);
       sceneBus   .removeEventListener('ungroupSelected',   onUngroupSelected);
       sceneBus   .removeEventListener('reparentNode',      onReparentNode);

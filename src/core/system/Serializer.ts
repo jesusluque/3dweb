@@ -3,6 +3,8 @@ import { DAGNode } from '../dag/DAGNode';
 import { MeshNode } from '../dag/MeshNode';
 import { CameraNode } from '../dag/CameraNode';
 import { GroupNode } from '../dag/GroupNode';
+import { LightNode } from '../dag/LightNode';
+import { GltfNode } from '../dag/GltfNode';
 
 /* ════════════════════════════════════════════════════════════════════════════
    Serialised data shapes
@@ -45,6 +47,10 @@ export class Serializer {
         const attributes: Record<string, any> = {};
         for (const [key, plug] of node.plugs.entries()) {
           attributes[key] = plug.getValue();
+        }
+        // GltfNode: embed the binary asset as base64 so the scene is self-contained
+        if (node instanceof GltfNode && (node as GltfNode).fileData) {
+          (attributes as any).__fileData = (node as GltfNode).fileData;
         }
         nodes.push({
           uuid: node.uuid,
@@ -97,7 +103,6 @@ export class Serializer {
       let node: DAGNode;
       if (s.type === 'MeshNode') {
         node = new MeshNode(s.name);
-        // Assign the serialised uuid so floating windows etc. still work
         (node as any).uuid = s.uuid;
         if (s.attributes.geometry != null) (node as MeshNode).geometryType.setValue(s.attributes.geometry);
         if (s.attributes.color != null)    (node as MeshNode).color.setValue(s.attributes.color);
@@ -110,6 +115,18 @@ export class Serializer {
         if (s.attributes.nearClip != null)                (node as CameraNode).nearClip.setValue(s.attributes.nearClip);
         if (s.attributes.farClip != null)                 (node as CameraNode).farClip.setValue(s.attributes.farClip);
         if (s.attributes.filmFit != null)                 (node as CameraNode).filmFit.setValue(s.attributes.filmFit);
+      } else if (s.type === 'LightNode') {
+        node = new LightNode(s.name);
+        (node as any).uuid = s.uuid;
+        if (s.attributes.lightType != null)  (node as LightNode).lightType.setValue(s.attributes.lightType);
+        if (s.attributes.color != null)      (node as LightNode).color.setValue(s.attributes.color);
+        if (s.attributes.intensity != null)  (node as LightNode).intensity.setValue(s.attributes.intensity);
+      } else if (s.type === 'GltfNode') {
+        const gn = new GltfNode(s.name);
+        (gn as any).uuid = s.uuid;
+        if (s.attributes.fileName != null)  gn.fileName.setValue(s.attributes.fileName);
+        if ((s.attributes as any).__fileData) gn.fileData = (s.attributes as any).__fileData;
+        node = gn;
       } else {
         // GroupNode or unknown → GroupNode
         node = new GroupNode(s.name);

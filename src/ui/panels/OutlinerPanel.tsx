@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
-import { ChevronRight, ChevronDown, Box, Camera, Eye, EyeOff, FolderOpen, FolderMinus, MonitorPlay } from 'lucide-react';
+import { ChevronRight, ChevronDown, Box, Camera, Eye, EyeOff, FolderOpen, FolderMinus, MonitorPlay, Lightbulb, Package } from 'lucide-react';
 import { dispatchScene } from '../buses';
 
 type DropSide = 'before' | 'after' | 'into';
@@ -10,6 +10,8 @@ const NODE_TYPE_ICON: Record<string, React.ReactNode> = {
   MeshNode:   <Box        size={12} style={{ color: '#7ec89c', flexShrink: 0 }} />,
   CameraNode: <Camera     size={12} style={{ color: '#a0c8f0', flexShrink: 0 }} />,
   GroupNode:  <FolderOpen size={12} style={{ color: '#d4a46e', flexShrink: 0 }} />,
+  LightNode:  <Lightbulb  size={12} style={{ color: '#f5d67a', flexShrink: 0 }} />,
+  GltfNode:   <Package    size={12} style={{ color: '#c8a0f0', flexShrink: 0 }} />,
   DAGNode:    <Eye        size={12} style={{ color: '#888',    flexShrink: 0 }} />,
 };
 

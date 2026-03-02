@@ -29,12 +29,17 @@ export const dispatchViewport = {
 
 // ── Scene creation commands ────────────────────────────────────────────────────
 export type PrimitiveType = 'box' | 'sphere' | 'cone' | 'plane';
+export type LightTypeEvent = 'directional' | 'point' | 'ambient' | 'spot';
 export const sceneBus = new EventTarget();
 export const dispatchScene = {
   createPrimitive: (type: PrimitiveType) =>
     sceneBus.dispatchEvent(new CustomEvent<PrimitiveType>('createPrimitive', { detail: type })),
   createCamera: () =>
     sceneBus.dispatchEvent(new CustomEvent('createCamera')),
+  createLight: (type: LightTypeEvent) =>
+    sceneBus.dispatchEvent(new CustomEvent<LightTypeEvent>('createLight', { detail: type })),
+  importGltf: () =>
+    sceneBus.dispatchEvent(new CustomEvent('importGltf')),
   groupSelected: () =>
     sceneBus.dispatchEvent(new CustomEvent('groupSelected')),
   ungroupSelected: () =>

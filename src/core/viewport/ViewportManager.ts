@@ -8,8 +8,11 @@ import { CameraNode } from '../dag/CameraNode';
 import { DAGNode } from '../dag/DAGNode';
 import { Vector3Data } from '../dag/DAGNode';
 import { MeshNode } from '../dag/MeshNode';
+import { LightNode, LightType } from '../dag/LightNode';
+import { GltfNode } from '../dag/GltfNode';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 /** Walk up the parent chain to check if `obj` is a descendant of `ancestor`. */
 function isDescendantOf(obj: THREE.Object3D, ancestor: THREE.Object3D): boolean {
@@ -42,6 +45,8 @@ export class ViewportManager {
   private isTransforming = false;
   private gridHelper: THREE.GridHelper | null = null;
   private lights: THREE.Light[] = [];
+  /** Map of LightNode UUID → { Three.js light, optional scene-space helper }. */
+  private lightHelperMap: Map<string, { light: THREE.Light; helper: THREE.Object3D | null }> = new Map();
   /** UUID of the CameraNode currently being looked through, or null = default persp cam. */
   private activeCamUuid: string | null = null;
   private lightingEnabled = true;
@@ -152,15 +157,11 @@ export class ViewportManager {
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.container.appendChild(this.renderer.domElement);
 
-    // Grid and lights
+    // Grid
     this.gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x333333);
     this.scene.add(this.gridHelper);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-    dirLight.position.set(5, 10, 7);
-    this.scene.add(dirLight);
-    const ambLight = new THREE.AmbientLight(0xffffff, 0.2);
-    this.scene.add(ambLight);
-    this.lights = [dirLight, ambLight];
+    // Default lights are created as LightNode DAG objects so they
+    // appear in the outliner.  They are added after syncInit().
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     
@@ -288,6 +289,12 @@ export class ViewportManager {
 
     // Sync DAG
     this.syncInit();
+    // Populate default lights only when opening a completely empty scene
+    // (syncInit may have already loaded saved lights from a prior serialise).
+    const hasAnyLight = Array.from(this.core.sceneGraph.nodes.values()).some(
+      n => n instanceof LightNode,
+    );
+    if (!hasAnyLight) this.createDefaultLights();
 
     // Bind Core selection events to view
     this.core.selectionManager.addListener(() => this.syncSelection());
@@ -574,8 +581,88 @@ export class ViewportManager {
       node.verticalFilmAperture.onDirty     = refresh;
       node.nearClip.onDirty                 = refresh;
       node.farClip.onDirty                  = refresh;
+    } else if (node instanceof LightNode) {
+      // ── Light node ────────────────────────────────────────────────────────
+      const type      = node.lightType.getValue() as LightType;
+      const colorHex  = node.color.getValue();
+      const intensity = node.intensity.getValue();
+
+      let light: THREE.Light;
+      let sceneHelper: THREE.Object3D | null = null;
+
+      if (type === 'point') {
+        const pl = new THREE.PointLight(colorHex, intensity);
+        sceneHelper = new THREE.PointLightHelper(pl, 0.35);
+        light = pl;
+      } else if (type === 'ambient') {
+        light = new THREE.AmbientLight(colorHex, intensity);
+      } else if (type === 'spot') {
+        const sl = new THREE.SpotLight(colorHex, intensity);
+        sl.angle = Math.PI / 6;
+        sceneHelper = new THREE.SpotLightHelper(sl);
+        light = sl;
+      } else {
+        // directional (default)
+        const dl = new THREE.DirectionalLight(colorHex, intensity);
+        sceneHelper = new THREE.DirectionalLightHelper(dl, 0.8);
+        light = dl;
+      }
+
+      if (sceneHelper) this.scene.add(sceneHelper);
+
+      // Visible indicator: small emissive sphere so you can click/see the light
+      const indicator = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 8, 6),
+        new THREE.MeshBasicMaterial({ color: colorHex }),
+      );
+
+      obj = new THREE.Group();
+      obj.add(light, indicator);
+
+      // Track for setLightingEnabled / removeNodeFromView
+      this.lightHelperMap.set(node.uuid, { light, helper: sceneHelper });
+      this.lights.push(light); // also register in legacy array for setLightingEnabled
+
+      // Wire plug changes → live light update
+      const refreshLight = () => {
+        const c = node.color.getValue();
+        (light as any).color?.set(c);
+        light.intensity = node.intensity.getValue();
+        (indicator.material as THREE.MeshBasicMaterial).color.set(c);
+        (sceneHelper as any)?.update?.();
+      };
+      node.color.onDirty     = refreshLight;
+      node.intensity.onDirty = refreshLight;
+
+    } else if (node instanceof GltfNode) {
+      // ── GLTF imported model ───────────────────────────────────────────────
+      if (node._loadedScene) {
+        obj = node._loadedScene;
+      } else if (node.fileData) {
+        // Re-parse from embedded base64 (e.g. after loading a saved scene)
+        obj = new THREE.Group(); // placeholder until async parse finishes
+        const binary = Uint8Array.from(atob(node.fileData), c => c.charCodeAt(0));
+        new GLTFLoader().parse(binary.buffer, '', (gltf) => {
+          node._loadedScene = gltf.scene;
+          const placeholder = this.nodeMap.get(node.uuid);
+          if (placeholder) {
+            // Swap placeholder with real content
+            gltf.scene.position.copy(placeholder.position);
+            gltf.scene.rotation.copy(placeholder.rotation);
+            gltf.scene.scale.copy(placeholder.scale);
+            this.scene.remove(placeholder);
+            this.scene.add(gltf.scene);
+            this.nodeMap.set(node.uuid, gltf.scene);
+          }
+        }, () => {
+          this.core.logger.log(`Could not re-parse GLTF for "${node.name}"`, 'error');
+        });
+      } else {
+        obj = new THREE.Group();
+      }
+
     } else {
-      // Basic transform
+      // Basic DAGNode / GroupNode → empty transform group
       obj = new THREE.Group();
     }
 
@@ -892,7 +979,13 @@ export class ViewportManager {
 
   public setLightingEnabled(enabled: boolean) {
     this.lightingEnabled = enabled;
+    // Legacy direct lights (none now — kept in case future code adds some)
     this.lights.forEach(l => { l.visible = enabled; });
+    // LightNode lights + their helpers
+    for (const [, entry] of this.lightHelperMap) {
+      entry.light.visible = enabled;
+      if (entry.helper) entry.helper.visible = enabled;
+    }
   }
 
   public removeNodeFromView(uuid: string) {
@@ -919,10 +1012,17 @@ export class ViewportManager {
     // Clean up camera helper
     const ch = this.cameraHelperMap.get(uuid);
     if (ch) {
-      // The helper was added directly to the scene (not as child of obj)
       this.scene.remove(ch.helper);
       ch.helper.dispose();
       this.cameraHelperMap.delete(uuid);
+    }
+    // Clean up light helper
+    const lh = this.lightHelperMap.get(uuid);
+    if (lh) {
+      if (lh.helper) this.scene.remove(lh.helper);
+      const idx = this.lights.indexOf(lh.light);
+      if (idx !== -1) this.lights.splice(idx, 1);
+      this.lightHelperMap.delete(uuid);
     }
   }
 
@@ -1213,6 +1313,109 @@ export class ViewportManager {
     );
     this.core.commandHistory.execute(cmd);
     this.core.logger.log(`Created camera "${name}"`, 'command');
+    this.onSceneChanged?.();
+  }
+
+  /** Create a light of the given type and add it as an undoable command. */
+  public createLight(type: LightType = 'directional'): void {
+    const prefixes: Record<LightType, string> = {
+      directional: 'directionalLight',
+      point:       'pointLight',
+      ambient:     'ambientLight',
+      spot:        'spotLight',
+    };
+    const name = this.nextAvailableName(`${prefixes[type]}1`);
+    const node = new LightNode(name);
+    node.lightType.setValue(type);
+    if (type === 'directional') {
+      node.translate.setValue({ x: 5, y: 10, z: 7 });
+    } else if (type === 'point') {
+      node.translate.setValue({ x: 0, y: 3, z: 0 });
+    } else if (type === 'spot') {
+      node.translate.setValue({ x: 0, y: 5, z: 0 });
+      node.rotate.setValue({ x: -90, y: 0, z: 0 });
+    }
+    const cmd = new CreateNodeCommand(
+      node, undefined,
+      this.core.sceneGraph, this.core.selectionManager,
+      (n) => this.addNodeToView(n),
+      (id) => this.removeNodeFromView(id),
+    );
+    this.core.commandHistory.execute(cmd);
+    this.core.logger.log(`Created ${type} light "${name}"`, 'command');
+    this.onSceneChanged?.();
+  }
+
+  /** Open the system file picker and import a GLB/GLTF as a single scene node. */
+  public async importGltf(): Promise<void> {
+    let file: File;
+    try {
+      const [handle] = await (window as any).showOpenFilePicker({
+        types: [{
+          description: 'GLTF / GLB 3D Models',
+          accept: { 'model/gltf-binary': ['.glb'], 'model/gltf+json': ['.gltf'] },
+        }],
+        multiple: false,
+      });
+      file = await handle.getFile();
+    } catch {
+      return; // user cancelled
+    }
+
+    const buffer = await file.arrayBuffer();
+    const loader = new GLTFLoader();
+
+    loader.parse(buffer, '', (gltf) => {
+      const root = gltf.scene;
+      root.updateMatrixWorld(true);
+
+      const baseName = file.name.replace(/\.[^.]+$/, '');
+      const name = this.nextAvailableName(baseName || 'import');
+      const node = new GltfNode(name);
+      node.fileName.setValue(file.name);
+      node._loadedScene = root;
+
+      // Embed binary as base64 for scene serialisation
+      const bytes = new Uint8Array(buffer);
+      let bin = '';
+      for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+      node.fileData = btoa(bin);
+
+      const cmd = new CreateNodeCommand(
+        node, undefined,
+        this.core.sceneGraph, this.core.selectionManager,
+        (n) => this.addNodeToView(n),
+        (id) => this.removeNodeFromView(id),
+      );
+      this.core.commandHistory.execute(cmd);
+      this.core.logger.log(`Imported "${file.name}" as "${name}"`, 'info');
+      this.onSceneChanged?.();
+    }, (err) => {
+      this.core.logger.log(`GLTF import failed: ${(err as any)?.message ?? err}`, 'error');
+    });
+  }
+
+  /**
+   * Create default directional + ambient lights as proper LightNode DAG objects.
+   * Called on new scene and on first construction when no lights exist.
+   * Does NOT add commands to history.
+   */
+  public createDefaultLights(): void {
+    const dir = new LightNode('directionalLight1');
+    dir.lightType.setValue('directional');
+    dir.color.setValue('#ffffff');
+    dir.intensity.setValue(1.0);
+    dir.translate.setValue({ x: 5, y: 10, z: 7 });
+    this.core.sceneGraph.addNode(dir);
+    this.addNodeToView(dir);
+
+    const amb = new LightNode('ambientLight1');
+    amb.lightType.setValue('ambient');
+    amb.color.setValue('#ffffff');
+    amb.intensity.setValue(0.2);
+    this.core.sceneGraph.addNode(amb);
+    this.addNodeToView(amb);
+
     this.onSceneChanged?.();
   }
 

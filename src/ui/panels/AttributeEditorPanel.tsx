@@ -3,6 +3,8 @@ import { useAppStore } from '../store/useAppStore';
 import { Plug, PlugType } from '../../core/dg/Plug';
 import { DAGNode } from '../../core/dag/DAGNode';
 import { CameraNode } from '../../core/dag/CameraNode';
+import { LightNode } from '../../core/dag/LightNode';
+import { GltfNode } from '../../core/dag/GltfNode';
 import type { Command } from '../../core/system/CommandHistory';
 import { CAMERA_PRESET_GROUPS, CAMERA_PRESET_MAP } from '../data/cameraPresets';
 
@@ -270,11 +272,78 @@ const CameraSection: React.FC<{ node: CameraNode; onChange: () => void }> = ({ n
     </>
   );
 };
-
-// ── Node attributes section ───────────────────────────────────────────────────
-const NodeAttrs: React.FC<{ node: DAGNode; onChange: () => void }> = ({ node, onChange }) => {
+// ── Light attributes section ──────────────────────────────────────────────────
+const LightSection: React.FC<{ node: LightNode; onChange: () => void }> = ({ node, onChange }) => {
   const [open, setOpen] = useState(true);
-  const plugs = Array.from(node.plugs.values()).filter(p => p.type !== PlugType.Vector3);
+  const [color,     setColor]     = useState(node.color.getValue());
+  const [intensity, setIntensity] = useState(node.intensity.getValue());
+
+  // Poll in case values change elsewhere
+  useEffect(() => {
+    const id = setInterval(() => {
+      setColor(node.color.getValue());
+      setIntensity(node.intensity.getValue());
+    }, 100);
+    return () => clearInterval(id);
+  }, [node]);
+
+  const lightTypeLabels: Record<string, string> = {
+    directional: 'Directional', point: 'Point', ambient: 'Ambient', spot: 'Spot',
+  };
+
+  return (
+    <>
+      <Sec title="Light" tag={lightTypeLabels[node.lightType.getValue()] ?? node.lightType.getValue()}
+           open={open} onToggle={() => setOpen(v => !v)} accent />
+      {open && (
+        <>
+          {/* Type — read-only */}
+          <CRow label="Type" value={node.lightType.getValue()} readOnly color={C.orange} />
+
+          {/* Color — native colour picker */}
+          <div style={{ display: 'grid', gridTemplateColumns: '42% 1fr', borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ padding: '3px 8px', fontSize: 11, color: C.muted,
+              borderRight: `1px solid ${C.border}`, fontFamily: '"Segoe UI",sans-serif',
+              display: 'flex', alignItems: 'center' }}>Color</div>
+            <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="color" value={color}
+                onChange={e => {
+                  setColor(e.target.value);
+                  node.color.setValue(e.target.value);
+                  onChange();
+                }}
+                style={{ width: 28, height: 20, padding: 0, border: 'none',
+                  background: 'transparent', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: 10, color: C.dim, fontFamily: 'monospace' }}>{color}</span>
+            </div>
+          </div>
+
+          {/* Intensity */}
+          <CRow
+            label="Intensity"
+            value={+intensity.toFixed(3)}
+            onChange={raw => {
+              const n = parseFloat(raw);
+              if (!isNaN(n)) {
+                setIntensity(n);
+                node.intensity.setValue(n);
+                onChange();
+              }
+            }}
+          />
+        </>
+      )}
+    </>
+  );
+};
+// ── Node attributes section ───────────────────────────────────────────────────
+const NodeAttrs: React.FC<{ node: DAGNode; onChange: () => void; exclude?: Set<string> }> = ({ node, onChange, exclude }) => {
+  const [open, setOpen] = useState(true);
+  const plugs = Array.from(node.plugs.values()).filter(
+    p => p.type !== PlugType.Vector3 && (!exclude || !exclude.has(p.name)),
+  );
   if (plugs.length === 0) return null;
   return (
     <>
@@ -385,8 +454,22 @@ export const AttributeEditorPanel: React.FC = () => {
           <CameraSection node={selectedNode} onChange={onChange} />
         )}
 
-        {/* Node-type-specific attributes */}
-        <NodeAttrs node={selectedNode} onChange={onChange} />
+        {/* Light-specific controls — only for LightNode */}
+        {selectedNode instanceof LightNode && (
+          <LightSection node={selectedNode} onChange={onChange} />
+        )}
+
+        {/* Node-type-specific attributes (skip plugs already shown in dedicated sections) */}
+        <NodeAttrs
+          node={selectedNode}
+          onChange={onChange}
+          exclude={selectedNode instanceof LightNode
+            ? new Set(['lightType', 'color', 'intensity'])
+            : selectedNode instanceof GltfNode
+              ? new Set(['fileName'])
+              : undefined
+          }
+        />
 
         {/* Command history — filtered to this node */}
         <Sec title="History" open={histOpen} onToggle={() => setHistOpen(v => !v)} accent />

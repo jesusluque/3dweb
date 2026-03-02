@@ -206,6 +206,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     core.selectionManager.clear();
     core.commandHistory.clear();
 
+    // Restore default directional + ambient lights as proper scene objects
+    vm.createDefaultLights();
+
     // Reset viewport settings to defaults
     set({
       viewportSettings: { ...DEFAULT_VIEWPORT_SETTINGS },
