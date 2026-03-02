@@ -54,6 +54,8 @@ export class ViewportManager {
   /** UUID of the CameraNode currently being looked through, or null = default persp cam. */
   private activeCamUuid: string | null = null;
   private lightingEnabled = true;
+  /** Whether editor gizmos/helpers are currently visible (toggleable via G key). */
+  private _editorsVisible = true;
   private currentShadingMode: 'smooth' | 'wireframe' | 'wireframe-on-shaded' = 'smooth';
   private wireframeOverlays: Map<string, THREE.LineSegments> = new Map();
   /** Selection outline meshes keyed by the selected MeshNode UUID. */
@@ -405,9 +407,52 @@ export class ViewportManager {
         case 'f': this.frameSelected(); break;
         case '+': case '=': this.setGizmoSize(this.getGizmoSize() + 0.15); break;
         case '-': case '_': this.setGizmoSize(this.getGizmoSize() - 0.15); break;
+        case 'g': this.toggleEditorGizmos(); break;
       }
     }
   };
+
+  /** Toggle all editor gizmos and helpers (G key — Unreal-Engine style). */
+  toggleEditorGizmos(): void {
+    this._editorsVisible = !this._editorsVisible;
+    const v = this._editorsVisible;
+
+    // Transform-controls handle
+    if (this.transformControls) {
+      this.transformControls.visible = v;
+      if (!v) {
+        // Detach so the draggable axes don't intercept mouse events while hidden
+        this.transformControls.detach();
+      } else {
+        // Re-attach to the current lead selection (mirrors syncSelection logic)
+        const lead = this.core.selectionManager.getLeadSelection();
+        if (lead && this.nodeMap.has(lead.uuid)) {
+          this.transformControls.enabled = true;
+          this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+        }
+      }
+    }
+
+    // Grid
+    if (this.gridHelper) {
+      this.gridHelper.visible = v;
+    }
+
+    // Camera body Groups + frustum helpers (skip the active look-through camera which is already hidden)
+    for (const [uuid, ch] of this.cameraHelperMap) {
+      ch.helper.visible = v && uuid !== this.activeCamUuid;
+      const bodyObj = this.nodeMap.get(uuid);
+      if (bodyObj) bodyObj.visible = v && uuid !== this.activeCamUuid;
+    }
+
+    // Light indicators (helper objects — NOT the actual lights, which affect rendering)
+    for (const [, entry] of this.lightHelperMap) {
+      if (entry.helper) entry.helper.visible = v;
+    }
+  }
+
+  /** Whether editor gizmos/helpers are currently shown. */
+  get editorsVisible(): boolean { return this._editorsVisible; }
 
   private onKeyDown = (e: KeyboardEvent) => {
     // All relevant keys are now handled by onWindowKeyDown.
@@ -419,7 +464,10 @@ export class ViewportManager {
     const lead = this.core.selectionManager.getLeadSelection();
     if (lead && this.nodeMap.has(lead.uuid)) {
       this.transformControls.enabled = true;
-      this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+      // Don't re-show the gizmo if editor gizmos are currently hidden (G key)
+      if (this._editorsVisible) {
+        this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+      }
     } else {
       this.transformControls.detach();
       this.transformControls.enabled = false;
@@ -985,9 +1033,12 @@ export class ViewportManager {
       this.transformControls.detach();
     } else {
       this.transformControls.setMode(mode as 'translate' | 'rotate' | 'scale');
-      const lead = this.core.selectionManager.getLeadSelection();
-      if (lead && this.nodeMap.has(lead.uuid)) {
-        this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+      // Only attach (show handle) when editor gizmos are visible
+      if (this._editorsVisible) {
+        const lead = this.core.selectionManager.getLeadSelection();
+        if (lead && this.nodeMap.has(lead.uuid)) {
+          this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+        }
       }
     }
   }

@@ -54,6 +54,8 @@ export const ViewportPanel: React.FC = () => {
   const [camDropOpen,   setCamDropOpen]   = useState(false);
   const [activeCamLabel, setActiveCamLabel] = useState('Perspective');
   const camDropRef = useRef<HTMLDivElement>(null);
+  /** Mirrors ViewportManager._editorsVisible for the overlay badge. */
+  const [editorsVisible, setEditorsVisible] = useState(true);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -93,6 +95,19 @@ export const ViewportPanel: React.FC = () => {
       if (node instanceof CameraNode) sceneCameras.push(node as CameraNode);
     }
   }
+
+  // Mirror G-key gizmo toggle state in React (for overlay badge)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable;
+      if (!isInput && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'g') {
+        setEditorsVisible(v => !v);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   // FPS counter
   useEffect(() => {
@@ -297,6 +312,28 @@ export const ViewportPanel: React.FC = () => {
       ref={containerRef}
       style={{ background: '#202020' }}
     >
+      {/* Gizmos-hidden badge (shown when G has been pressed) */}
+      {!editorsVisible && (
+        <div style={{
+          position: 'absolute',
+          bottom: '10px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 30,
+          pointerEvents: 'none',
+          padding: '3px 10px',
+          fontSize: '10px',
+          fontFamily: '"Segoe UI", system-ui, sans-serif',
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: 'rgba(255,220,80,0.90)',
+          background: 'rgba(20,20,20,0.72)',
+          border: '1px solid rgba(255,220,80,0.30)',
+          borderRadius: '3px',
+          userSelect: 'none',
+        }}>Gizmos Hidden — Press G to restore</div>
+      )}
+
       {vs.showGateMask && (
         <GateMask
           containerRef={containerRef}
