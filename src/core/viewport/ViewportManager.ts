@@ -676,6 +676,14 @@ export class ViewportManager {
             this.scene.remove(placeholder);
             this.scene.add(gltf.scene);
             this.nodeMap.set(node.uuid, gltf.scene);
+
+            // Rebind onDirty callbacks so they reference the real scene
+            // instead of the now-removed placeholder (needed for undo/redo
+            // and AE edits to visually update the correct Three.js object).
+            node.translate.onDirty   = () => this.updateNodeTRS(node, gltf.scene);
+            node.rotate.onDirty      = () => this.updateNodeTRS(node, gltf.scene);
+            node.scale.onDirty       = () => this.updateNodeTRS(node, gltf.scene);
+            node.visibility.onDirty  = () => { gltf.scene.visible = node.visibility.getValue(); };
           }
         }, () => {
           this.core.logger.log(`Could not re-parse GLTF for "${node.name}"`, 'error');

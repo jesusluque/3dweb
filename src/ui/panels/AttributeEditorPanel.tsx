@@ -2,10 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { Plug, PlugType } from '../../core/dg/Plug';
 import { DAGNode } from '../../core/dag/DAGNode';
+import type { Vector3Data } from '../../core/dag/DAGNode';
 import { CameraNode } from '../../core/dag/CameraNode';
 import { LightNode } from '../../core/dag/LightNode';
 import { GltfNode } from '../../core/dag/GltfNode';
 import type { Command } from '../../core/system/CommandHistory';
+import { TransformCommand } from '../../core/system/commands/TransformCommand';
 import { CAMERA_PRESET_GROUPS, CAMERA_PRESET_MAP } from '../data/cameraPresets';
 
 // ── Colour palette ─────────────────────────────────────────────────────────────
@@ -103,7 +105,14 @@ const Sec: React.FC<{
 );
 
 // ── Vec3 channel rows  ─────────────────────────────────────────────────────────
-const Vec3Rows: React.FC<{ plug: Plug<any>; onChange: () => void }> = ({ plug, onChange }) => {
+type Vec3RowsProps = {
+  plug: Plug<any>;
+  onChange: () => void;
+  /** When provided, a TransformCommand is recorded in history on each commit. */
+  node?: DAGNode;
+  recordTransform?: (oldT: Vector3Data, oldR: Vector3Data, oldS: Vector3Data) => void;
+};
+const Vec3Rows: React.FC<Vec3RowsProps> = ({ plug, onChange, node, recordTransform }) => {
   const [val, setVal] = useState(plug.getValue());
   useEffect(() => {
     const id = setInterval(() => setVal({ ...plug.getValue() }), 100);
@@ -111,9 +120,17 @@ const Vec3Rows: React.FC<{ plug: Plug<any>; onChange: () => void }> = ({ plug, o
   }, [plug]);
 
   const up = (axis: 'x' | 'y' | 'z', raw: string) => {
+    // Snapshot full TRS before the change so we can record an undoable command
+    const oldT: Vector3Data = node ? { ...node.translate.getValue() } : { x: 0, y: 0, z: 0 };
+    const oldR: Vector3Data = node ? { ...node.rotate.getValue()    } : { x: 0, y: 0, z: 0 };
+    const oldS: Vector3Data = node ? { ...node.scale.getValue()     } : { x: 1, y: 1, z: 1 };
+
     const n = parseFloat(raw);
     const next = { ...val, [axis]: isNaN(n) ? 0 : n };
     plug.setValue(next); setVal(next); onChange();
+
+    // Record a TransformCommand so this edit appears in history
+    if (recordTransform) recordTransform(oldT, oldR, oldS);
   };
   const lbl = plug.name.charAt(0).toUpperCase() + plug.name.slice(1);
   return (
@@ -166,7 +183,8 @@ const HistoryPanel: React.FC<{ filterUuid?: string }> = ({ filterUuid }) => {
           <span style={{ ...iconStyle, color: C.green }}>↩</span>
           <span style={{ color: C.text, flex: 1 }}>{cmd.description ?? 'command'}</span>
           <button
-            onClick={() => { core.commandHistory.undo(); }}
+            title="Undo to this point"
+            onClick={() => { core.commandHistory.undoDownTo(cmd); }}
             style={{
               fontSize: 9, padding: '1px 5px', background: 'transparent',
               border: `1px solid ${C.border}`, borderRadius: 2,
@@ -182,7 +200,8 @@ const HistoryPanel: React.FC<{ filterUuid?: string }> = ({ filterUuid }) => {
           <span style={{ ...iconStyle, color: C.orange }}>↪</span>
           <span style={{ color: C.dim, flex: 1 }}>{cmd.description ?? 'command'}</span>
           <button
-            onClick={() => { core.commandHistory.redo(); }}
+            title="Redo to this point"
+            onClick={() => { core.commandHistory.redoUpTo(cmd); }}
             style={{
               fontSize: 9, padding: '1px 5px', background: 'transparent',
               border: `1px solid ${C.border}`, borderRadius: 2,
@@ -391,11 +410,29 @@ const NodeAttrs: React.FC<{ node: DAGNode; onChange: () => void; exclude?: Set<s
 export const AttributeEditorPanel: React.FC = () => {
   const selectedNode   = useAppStore(s => s.leadSelection);
   const markSceneDirty = useAppStore(s => s.markSceneDirty);
+  const core           = useAppStore(s => s.core);
   const [, setTick]  = useState(0);
   const [xformOpen,  setXformOpen]  = useState(true);
   const [histOpen,   setHistOpen]   = useState(true);
 
   const onChange = () => { markSceneDirty(); setTick(t => t + 1); };
+
+  /** Build a recordTransform callback bound to the current lead node. */
+  const makeRecordTransform = (n: DAGNode) =>
+    (oldT: Vector3Data, oldR: Vector3Data, oldS: Vector3Data) => {
+      if (!core) return;
+      const newT = { ...n.translate.getValue() };
+      const newR = { ...n.rotate.getValue() };
+      const newS = { ...n.scale.getValue() };
+      const moved =
+        Math.abs(newT.x-oldT.x)>1e-5 || Math.abs(newT.y-oldT.y)>1e-5 || Math.abs(newT.z-oldT.z)>1e-5 ||
+        Math.abs(newR.x-oldR.x)>1e-5 || Math.abs(newR.y-oldR.y)>1e-5 || Math.abs(newR.z-oldR.z)>1e-5 ||
+        Math.abs(newS.x-oldS.x)>1e-5 || Math.abs(newS.y-oldS.y)>1e-5 || Math.abs(newS.z-oldS.z)>1e-5;
+      if (!moved) return;
+      const cmd = new TransformCommand([{ node: n, oldTranslate: oldT, newTranslate: newT, oldRotate: oldR, newRotate: newR, oldScale: oldS, newScale: newS }]);
+      core.commandHistory.record(cmd);
+      core.logger.log(cmd.description!, 'command');
+    };
 
   if (!selectedNode) {
     return (
@@ -446,7 +483,8 @@ export const AttributeEditorPanel: React.FC = () => {
         {/* Transform section */}
         <Sec title="Transform" tag="transform" open={xformOpen} onToggle={() => setXformOpen(v => !v)} />
         {xformOpen && vec3Plugs.map(plug => (
-          <Vec3Rows key={plug.name} plug={plug} onChange={onChange} />
+          <Vec3Rows key={plug.name} plug={plug} onChange={onChange}
+            node={selectedNode} recordTransform={makeRecordTransform(selectedNode)} />
         ))}
 
         {/* Camera-specific preset picker — only for CameraNode */}

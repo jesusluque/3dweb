@@ -43,7 +43,9 @@ export class DeleteCommand implements Command {
     };
     for (const r of roots) collect(r);
 
-    this.description = `Delete ${roots.length} object(s)`;
+    const nameList = roots.slice(0, 2).map(n => `"${n.name}"`).join(', ');
+    const extra = roots.length > 2 ? ` +${roots.length - 2} more` : '';
+    this.description = `Delete ${nameList}${extra}`;
     this.affectedNodeUuids = uuids;
   }
 

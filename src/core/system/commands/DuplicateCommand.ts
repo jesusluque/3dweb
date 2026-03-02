@@ -22,7 +22,9 @@ export class DuplicateCommand implements Command {
     private readonly selectionManager: SelectionManager,
     private readonly removeFromView: (uuid: string) => void,
   ) {
-    this.description = `Duplicate ${rootClones.length} object(s)`;
+    const nameList = originalSources.slice(0, 2).map(n => `"${n.name}"`).join(', ');
+    const extra = originalSources.length > 2 ? ` +${originalSources.length - 2} more` : '';
+    this.description = `Duplicate ${nameList}${extra}`;
     this.affectedNodeUuids = new Set(clones.map(n => n.uuid));
   }
 

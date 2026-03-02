@@ -51,6 +51,26 @@ export class CommandHistory {
     }
   }
 
+  /** Undo all commands down to and including `target` in one shot.
+   *  If `target` is not in the undo stack this is a no-op. */
+  public undoDownTo(target: Command) {
+    while (this.undoStack.length > 0) {
+      const top = this.undoStack[this.undoStack.length - 1];
+      this.undo();
+      if (top === target) break;
+    }
+  }
+
+  /** Redo all commands up to and including `target` in one shot.
+   *  If `target` is not in the redo stack this is a no-op. */
+  public redoUpTo(target: Command) {
+    while (this.redoStack.length > 0) {
+      const top = this.redoStack[this.redoStack.length - 1];
+      this.redo();
+      if (top === target) break;
+    }
+  }
+
   /** Discard all undo/redo history (e.g. on scene load or new scene). */
   public clear() {
     this.undoStack = [];
