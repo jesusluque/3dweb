@@ -31,6 +31,10 @@ import { DuplicateCommand } from '../system/commands/DuplicateCommand';
 import { DeleteCommand } from '../system/commands/DeleteCommand';
 import { GroupNode } from '../dag/GroupNode';
 
+/** Maximum cosmetic far distance for the camera frustum helper — keeps the
+ *  frustum a reasonable size regardless of the camera's actual far-clip value. */
+const VISUAL_FRUSTUM_FAR = 3.0;
+
 export class ViewportManager {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer | any;
@@ -552,20 +556,39 @@ export class ViewportManager {
       const material = new THREE.MeshStandardMaterial({ color: node.color.getValue() });
       obj = new THREE.Mesh(geometry, material);
     } else if (node instanceof CameraNode) {
-      // Build a PerspectiveCamera properly configured from the node's plugs
+      // Build a PerspectiveCamera with a capped cosmetic far so the frustum
+      // helper stays a reasonable size in the viewport.
       const renderAspect = this.renderResolution.w / this.renderResolution.h;
       const { fovV } = node.getProjectionData(renderAspect);
       const helperCam = new THREE.PerspectiveCamera(
         fovV,
         renderAspect,
         node.nearClip.getValue(),
-        node.farClip.getValue(),
+        Math.min(node.farClip.getValue(), VISUAL_FRUSTUM_FAR),
       );
       helperCam.updateProjectionMatrix();
 
+      // ── Camera body indicator ───────────────────────────────────────────────────
+      // Invisible solid Mesh → raycaster hits it so the camera is clickable.
+      // Gold LineSegments edges → wireframe visual (no filled volume).
+      // Lens bump points along camera -Z (forward into the scene).
+      const camColor = 0xffdd00;
+      const edgeMat  = new THREE.LineBasicMaterial({ color: camColor });
+
+      const bodyGeo  = new THREE.BoxGeometry(0.42, 0.26, 0.30);
+      const bodyMesh = new THREE.Mesh(bodyGeo, new THREE.MeshBasicMaterial({ visible: false }));
+      const bodyEdge = new THREE.LineSegments(new THREE.EdgesGeometry(bodyGeo), edgeMat);
+
+      const lensGeo  = new THREE.CylinderGeometry(0.06, 0.09, 0.16, 8);
+      lensGeo.rotateX(Math.PI / 2);
+      const lensMesh = new THREE.Mesh(lensGeo, new THREE.MeshBasicMaterial({ visible: false }));
+      lensMesh.position.z = -0.22;
+      const lensEdge = new THREE.LineSegments(new THREE.EdgesGeometry(lensGeo), edgeMat);
+      lensEdge.position.z = -0.22;
+
       obj = new THREE.Group();
       // helperCam lives INSIDE the group so it inherits the group’s world matrix
-      obj.add(helperCam);
+      obj.add(helperCam, bodyMesh, bodyEdge, lensMesh, lensEdge);
 
       // CameraHelper is added directly to the scene so the group transform
       // is NOT applied a second time to the already–world–space frustum lines
@@ -791,6 +814,10 @@ export class ViewportManager {
         const camObj  = this.nodeMap.get(uuid);
         if (!(camNode instanceof CameraNode) || !camObj) continue;
 
+        // Hide this camera's own body so it doesn't appear in its own preview
+        const wasVisible = camObj.visible;
+        camObj.visible = false;
+
         const { fovV } = camNode.getProjectionData(this.camera.aspect);
         this.camera.fov  = fovV;
         this.camera.near = camNode.nearClip.getValue();
@@ -802,6 +829,8 @@ export class ViewportManager {
         this.renderer.render(this.scene, this.camera);
         const src = this.renderer.domElement as HTMLCanvasElement;
         for (const cb of listeners) cb(src);
+
+        camObj.visible = wasVisible;
       }
 
       // Restore main camera state and re-render the main viewport
@@ -1039,7 +1068,8 @@ export class ViewportManager {
     helperCam.fov    = fovV;
     helperCam.aspect = renderAspect;
     helperCam.near   = node.nearClip.getValue();
-    helperCam.far    = node.farClip.getValue();
+    // Keep the visual frustum capped so it never becomes an enormous cone.
+    helperCam.far    = Math.min(node.farClip.getValue(), VISUAL_FRUSTUM_FAR);
     helperCam.updateProjectionMatrix();
     helper.update();
   }
@@ -1173,6 +1203,26 @@ export class ViewportManager {
       g.scale.setValue({ ...src.scale.getValue() });
       g.visibility.setValue(src.visibility.getValue());
       clone = g;
+    } else if (src instanceof LightNode) {
+      const l = new LightNode(this.nextAvailableName(src.name));
+      l.lightType.setValue(src.lightType.getValue());
+      l.color.setValue(src.color.getValue());
+      l.intensity.setValue(src.intensity.getValue());
+      l.translate.setValue({ ...src.translate.getValue() });
+      l.rotate.setValue({ ...src.rotate.getValue() });
+      l.scale.setValue({ ...src.scale.getValue() });
+      l.visibility.setValue(src.visibility.getValue());
+      clone = l;
+    } else if (src instanceof GltfNode) {
+      const gn = new GltfNode(this.nextAvailableName(src.name));
+      gn.fileName.setValue(src.fileName.getValue());
+      gn.fileData = src.fileData;
+      gn._loadedScene = src._loadedScene ? src._loadedScene.clone() : null;
+      gn.translate.setValue({ ...src.translate.getValue() });
+      gn.rotate.setValue({ ...src.rotate.getValue() });
+      gn.scale.setValue({ ...src.scale.getValue() });
+      gn.visibility.setValue(src.visibility.getValue());
+      clone = gn;
     } else {
       return null;
     }
@@ -1421,10 +1471,12 @@ export class ViewportManager {
 
   /** Look through a CameraNode (pass null to return to default Perspective). */
   public lookThroughCamera(cameraNodeUuid: string | null) {
-    // Toggle helper visibility: hide when looking through its own camera
+    // Restore previous camera's body + frustum lines
     if (this.activeCamUuid) {
-      const prevCh = this.cameraHelperMap.get(this.activeCamUuid);
+      const prevCh  = this.cameraHelperMap.get(this.activeCamUuid);
       if (prevCh) prevCh.helper.visible = true;
+      const prevObj = this.nodeMap.get(this.activeCamUuid);
+      if (prevObj) prevObj.visible = true;
     }
     this.activeCamUuid = cameraNodeUuid;
     if (!cameraNodeUuid) {
@@ -1437,9 +1489,11 @@ export class ViewportManager {
     } else {
       // Disable orbit when looking through a scene camera
       this.controls.enabled = false;
-      // Hide this camera's own frustum helper while we're looking through it
+      // Hide this camera's frustum lines AND body while looking through it
       const ch = this.cameraHelperMap.get(cameraNodeUuid);
       if (ch) ch.helper.visible = false;
+      const bodyObj = this.nodeMap.get(cameraNodeUuid);
+      if (bodyObj) bodyObj.visible = false;
     }
     this.onSceneChanged?.();
   }
