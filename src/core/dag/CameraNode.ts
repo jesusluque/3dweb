@@ -42,13 +42,20 @@ export class CameraNode extends DAGNode {
 
     let activeVMm = vMm;
 
-    if (fit === FilmFit.Horizontal || (fit === FilmFit.Fill && viewportAspect < filmAspect)) {
+    // Fill: scale film to FILL the render frame (crop if aspect mismatch).
+    //   render wider than film  → Horizontal fit (scale by width,  crop height)
+    //   render taller than film → Vertical   fit (scale by height, crop width)
+    // Overscan is the exact opposite: show all film content, add bars if needed.
+    if (fit === FilmFit.Horizontal || (fit === FilmFit.Fill && viewportAspect > filmAspect)) {
       activeVMm = hMm / viewportAspect;
-    } else if (fit === FilmFit.Vertical || (fit === FilmFit.Fill && viewportAspect >= filmAspect)) {
+    } else if (fit === FilmFit.Vertical || (fit === FilmFit.Fill && viewportAspect <= filmAspect)) {
       activeVMm = vMm;
     } else if (fit === FilmFit.Overscan) {
-      if (viewportAspect < filmAspect) activeVMm = vMm;
-      else activeVMm = hMm / viewportAspect;
+      // Overscan: always reveal the full filmback — no content is cropped.
+      // render wider than film  → Vertical   fit (full film height, side overscan/bars)
+      // render taller than film → Horizontal fit (full film width, top/bottom overscan/bars)
+      if (viewportAspect >= filmAspect) activeVMm = vMm;
+      else                              activeVMm = hMm / viewportAspect;
     }
 
     const fovRad = 2 * Math.atan(activeVMm / (2 * fLen));

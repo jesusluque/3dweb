@@ -30,4 +30,31 @@ describe('CameraNode - Cinematic Math Validations', () => {
 
     expect(projWidescreen.fovV).toBeLessThan(projSquare.fovV);
   });
+
+  it('Overscan shows LARGER fovV than Fill for the same viewport aspect', () => {
+    // With a 16:9 render (wider than 35mm film 1.5 aspect):
+    //   Fill      → Horizontal fit → crops top/bottom      → smaller fovV (tighter)
+    //   Overscan  → Vertical   fit → full film height shown → fovV = native vertical fov
+    const viewAspect = 16 / 9;
+
+    const camFill = new CameraNode('Fill');
+    camFill.filmFit.setValue(FilmFit.Fill);
+    const { fovV: fovFill } = camFill.getProjectionData(viewAspect);
+
+    const camOver = new CameraNode('Overscan');
+    camOver.filmFit.setValue(FilmFit.Overscan);
+    const { fovV: fovOver } = camOver.getProjectionData(viewAspect);
+
+    // Overscan must show a bigger vertical field than Fill
+    expect(fovOver).toBeGreaterThan(fovFill);
+
+    // Overscan fovV with wider render == native vertical fov (vMm/fl based)
+    const vMm = 0.945 * 25.4;
+    const fl  = 35;
+    const nativeFovV = 2 * Math.atan(vMm / (2 * fl)) * (180 / Math.PI);
+    expect(fovOver).toBeCloseTo(nativeFovV, 2);
+
+    // Fill fovV must be less than native (it crops by using the horizontal sensor drive)
+    expect(fovFill).toBeLessThan(nativeFovV);
+  });
 });

@@ -308,6 +308,15 @@ export const SettingsPanelContent: React.FC = () => {
     updateVS({ outlineWidth: v });
     dispatchViewport.setOutlineWidth(v);
   };
+  const toggleAnaglyph = () => {
+    const n = !vs.anaglyphEnabled;
+    updateVS({ anaglyphEnabled: n });
+    vm?.setAnaglyphEnabled(n, vs.anaglyphIPD);
+  };
+  const setIPD = (v: number) => {
+    updateVS({ anaglyphIPD: v });
+    vm?.setAnaglyphIPD(v);
+  };
 
   return (
     <div style={{
@@ -375,6 +384,17 @@ export const SettingsPanelContent: React.FC = () => {
             />
           </>
         )}
+      </Section>
+
+      {/* ── ANAGLYPH 3D ──────────────────────────────────────────── */}
+      <Section title="Anaglyph 3D">
+        <ToggleRow label="Enable Anaglyph" checked={vs.anaglyphEnabled} onChange={toggleAnaglyph} />
+        <SliderRow
+          label="IPD (mm)"
+          value={Math.round(vs.anaglyphIPD * 1000)}
+          min={40} max={100} step={1}
+          onChange={v => setIPD(v / 1000)}
+        />
       </Section>
 
       {/* ── RENDER ──────────────────────────────────────────────────── */}

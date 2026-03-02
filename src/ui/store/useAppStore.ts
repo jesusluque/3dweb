@@ -32,6 +32,8 @@ export interface ViewportSettings {
   outlineEnabled: boolean;
   outlineColor: string;
   outlineWidth: number;
+  anaglyphEnabled: boolean;
+  anaglyphIPD: number;            // Inter-Pupillary Distance in metres (default 0.064)
 }
 
 const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
@@ -48,6 +50,8 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   outlineEnabled: true,
   outlineColor: '#d4aa30',
   outlineWidth: 2.5,
+  anaglyphEnabled: false,
+  anaglyphIPD: 0.064,
 };
 
 interface AppState {

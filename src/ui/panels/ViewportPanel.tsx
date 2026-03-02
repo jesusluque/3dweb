@@ -256,6 +256,24 @@ export const ViewportPanel: React.FC = () => {
     vmRef.current?.setGridVisible(next);
   };
 
+  const toggleAnaglyph = () => {
+    updateVS({ anaglyphEnabled: !vs.anaglyphEnabled });
+    // VM sync is handled by the useEffect below
+  };
+
+  // Sync VM when anaglyph is toggled
+  useEffect(() => {
+    const vm = vmRef.current;
+    if (!vm) return;
+    vm.setAnaglyphEnabled(vs.anaglyphEnabled, vs.anaglyphIPD);
+  }, [vs.anaglyphEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync VM when IPD changes (live update — no rebuild)
+  useEffect(() => {
+    if (!vs.anaglyphEnabled) return;
+    vmRef.current?.setAnaglyphIPD(vs.anaglyphIPD);
+  }, [vs.anaglyphIPD]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const shadingLabel =
     vs.shadingMode === 'smooth'                ? 'Smooth Shaded'
   : vs.shadingMode === 'wireframe-on-shaded'   ? 'Wires on Shaded'
@@ -355,6 +373,9 @@ export const ViewportPanel: React.FC = () => {
           </OverlayBtn>
           <OverlayBtn title="Toggle film gate mask" active={vs.showGateMask} onClick={() => updateVS({ showGateMask: !vs.showGateMask })}>
             Gate
+          </OverlayBtn>
+          <OverlayBtn title="Anaglyph 3D stereo (red/cyan)" active={vs.anaglyphEnabled} onClick={toggleAnaglyph}>
+            3D
           </OverlayBtn>
           {/* Settings gear */}
           <div ref={settingsRef} style={{ position: 'relative' }}>
@@ -456,6 +477,23 @@ export const ViewportPanel: React.FC = () => {
         </div>
 
         <div style={{ flex: 1 }} />
+
+        {/* Anaglyph active badge */}
+        {vs.anaglyphEnabled && (
+          <div style={{
+            pointerEvents: 'none',
+            fontSize: '10px',
+            color: '#ff6b6b',
+            background: 'rgba(0,0,0,0.55)',
+            padding: '2px 7px',
+            borderRadius: '3px',
+            fontFamily: '"Segoe UI", system-ui, sans-serif',
+            letterSpacing: '0.04em',
+            marginRight: '4px',
+          }}>
+            &#9632; ANAGLYPH
+          </div>
+        )}
 
         {/* FPS indicator */}
         <div style={{

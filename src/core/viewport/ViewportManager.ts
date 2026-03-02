@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 // @ts-ignore
-import { WebGPURenderer } from 'three/webgpu';
+import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu';
+// @ts-ignore
+import { texture as tslTexture, vec4, float } from 'three/tsl';
 import { EngineCore } from '../EngineCore';
 import { CameraNode } from '../dag/CameraNode';
 import { DAGNode } from '../dag/DAGNode';
@@ -55,6 +57,19 @@ export class ViewportManager {
   private outlineEnabled = true;
   private outlineColorHex = '#d4aa30';   // maya-gold
   private outlinePixels   = 2.5;         // desired screen-space thickness in px
+  // ── Anaglyph 3D stereo effect ────────────────────────────────────────────
+  private _anaglyphEnabled = false;
+  private _stereo:     THREE.StereoCamera | null = null;
+  private _leftRT:     THREE.WebGLRenderTarget | null = null;
+  private _rightRT:    THREE.WebGLRenderTarget | null = null;
+  private _quadScene:  THREE.Scene | null = null;
+  private _quadCamera: THREE.OrthographicCamera | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _compMat:    any = null;  // MeshBasicNodeMaterial (three/webgpu)
+  /** ResizeObserver watches the container so we resize exactly when the DOM
+   *  element changes size (after flexlayout reflow), not on window.resize. */
+  private _resizeObserver: ResizeObserver | null = null;
+
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
 
@@ -101,6 +116,9 @@ export class ViewportManager {
   public getRendererCanvas(): HTMLCanvasElement { return this.renderer.domElement as HTMLCanvasElement; }
   public setRenderResolution(w: number, h: number): void {
     this.renderResolution = { w, h };
+    // Re-lock the camera aspect to the new render ratio
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
     // Refresh all camera helpers so the frustum reflects the new render aspect
     for (const [uuid, _] of this.cameraHelperMap) {
       const camNode = this.core.sceneGraph.getNodeById(uuid);
@@ -253,12 +271,13 @@ export class ViewportManager {
 
     this.scene.add(this.transformControls.getHelper());
 
-    window.addEventListener('resize', this.onResize);
     // ⌘G / Ctrl+G must be caught at window level so the browser's
     // "Find Next" shortcut is suppressed before reaching the container.
     window.addEventListener('keydown', this.onWindowKeyDown);
-
-    // Ensure the container handles keyboard inputs for Hotkeys
+    // Watch the container element for size changes (fires after flexlayout reflow,
+    // unlike window 'resize' which fires before panels have been laid out).
+    this._resizeObserver = new ResizeObserver(() => this.onResize());
+    this._resizeObserver.observe(this.container);
     this.container.tabIndex = 0;
     this.container.addEventListener('keydown', this.onKeyDown);
     
@@ -475,14 +494,35 @@ export class ViewportManager {
     this.outlinePixels = Math.max(0.1, px);
   }
 
+  // ── Anaglyph 3D ─────────────────────────────────────────────────────────
+
+  /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
+  public setAnaglyphEnabled(enabled: boolean, ipd: number): void {
+    this._anaglyphEnabled = enabled;
+    if (enabled) {
+      this._buildAnaglyphResources(ipd);
+    } else {
+      this._destroyAnaglyphResources();
+    }
+  }
+
+  /** Update IPD live without rebuilding resources. */
+  public setAnaglyphIPD(ipd: number): void {
+    if (this._stereo) this._stereo.eyeSep = ipd;
+  }
+
   private onResize = () => {
     if (!this.container) return;
-    const width = this.container.clientWidth;
+    const width  = this.container.clientWidth;
     const height = this.container.clientHeight;
     this.renderer.setSize(width, height);
-    this.camera.aspect = width / height;
+    // Camera aspect is always the RENDER resolution ratio, not the panel ratio.
+    this.camera.aspect = this.renderResolution.w / this.renderResolution.h;
     this.camera.updateProjectionMatrix();
-    // Also update any DAG Cinematic cameras
+    // RTs must match the new gate size so the compositor has no distortion.
+    if (this._anaglyphEnabled && this._stereo) {
+      this._buildAnaglyphResources(this._stereo.eyeSep);
+    }
   };
 
   private syncInit() {
@@ -608,7 +648,8 @@ export class ViewportManager {
     //   scale = 1 + targetWorldOffset / boundingRadius
     if (this.outlineMap.size > 0) {
       const fovRad  = THREE.MathUtils.degToRad(this.camera.fov);
-      const focalPx = (this.container.clientHeight / 2) / Math.tan(fovRad / 2);
+      const gate    = this._gateViewport();
+      const focalPx = (gate.h / 2) / Math.tan(fovRad / 2);
       for (const [uuid, outlineMesh] of this.outlineMap) {
         outlineMesh.getWorldPosition(this._outlineTmpPos);
         const dist = this.camera.position.distanceTo(this._outlineTmpPos);
@@ -632,7 +673,7 @@ export class ViewportManager {
       if (ch.helper.visible) ch.helper.update();
     }
 
-    this.renderer.render(this.scene, this.camera);
+    this._renderMain();
     // Notify frame listeners (CameraViewPanel etc.)
     if (this.frameListeners.size > 0) {
       const src = this.renderer.domElement as HTMLCanvasElement;
@@ -688,9 +729,130 @@ export class ViewportManager {
       for (const h of hiddenHelpers) h.visible = true;
       if (this.gridHelper) this.gridHelper.visible = gridWasVisible;
 
-      this.renderer.render(this.scene, this.camera);
+      this._renderMain();
     }
   };
+
+  /** Gate rect in Three.js viewport coordinates (CSS logical pixels, y from BOTTOM of canvas). */
+  private _gateViewport(): { x: number; y: number; w: number; h: number } {
+    const vpW = this.container.clientWidth;
+    const vpH = this.container.clientHeight;
+    const rA  = this.renderResolution.w / this.renderResolution.h;
+    const vA  = vpW / vpH;
+    let gW: number, gH: number, bX: number, bY: number;
+    if (vA > rA) {
+      gH = vpH; gW = gH * rA;  bX = (vpW - gW) / 2; bY = 0;
+    } else {
+      gW = vpW; gH = gW / rA;  bX = 0; bY = (vpH - gH) / 2;
+    }
+    // Three.js setViewport/setScissor measure y from the bottom of the canvas
+    return { x: bX, y: vpH - bY - gH, w: gW, h: gH };
+  }
+
+  /** Render the main viewport — stereo anaglyph (RT composite) or normal.
+   *  Always clips to the gate rect so the 3D image is never stretched
+   *  when the panel aspect differs from the render resolution aspect. */
+  private _renderMain(): void {
+    const gate = this._gateViewport();
+
+    if (
+      this._anaglyphEnabled && this._stereo &&
+      this._leftRT && this._rightRT && this._quadScene && this._quadCamera
+    ) {
+      // ── Anaglyph via render-target composite ─────────────────────────
+      // Guard: if the panel was laid out after setAnaglyphEnabled fired (e.g.
+      // React useEffect before flexlayout settles), the RT pixel dimensions may
+      // not match the current gate. Rebuild if they differ.
+      const dpr = window.devicePixelRatio;
+      const gPW = Math.max(1, Math.round(gate.w * dpr));
+      const gPH = Math.max(1, Math.round(gate.h * dpr));
+      if (this._leftRT.width !== gPW || this._leftRT.height !== gPH) {
+        this._buildAnaglyphResources(this._stereo.eyeSep);
+      }
+
+      this._stereo.update(this.camera);
+
+      const prevAutoClear = this.renderer.autoClear;
+      this.renderer.autoClear = true;
+
+      // Render each eye into its own RT (no scissor needed — camera aspect is locked)
+      this.renderer.setRenderTarget(this._leftRT);
+      this.renderer.render(this.scene, this._stereo.cameraL);
+
+      this.renderer.setRenderTarget(this._rightRT);
+      this.renderer.render(this.scene, this._stereo.cameraR);
+
+      // Back to screen — clear canvas then composite quad into gate area
+      this.renderer.setRenderTarget(null);
+      this.renderer.autoClear = false;
+      this.renderer.clear(true, true, true);   // clears full canvas (bars → bg colour)
+
+      this.renderer.setScissorTest(true);
+      this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
+      this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
+      this.renderer.render(this._quadScene, this._quadCamera);
+
+      this.renderer.setScissorTest(false);
+      this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+      this.renderer.autoClear = prevAutoClear;
+      return;
+    }
+
+    // Normal render — clip to gate so nothing outside is drawn
+    this.renderer.setScissorTest(true);
+    this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
+    this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+  }
+
+  private _buildAnaglyphResources(ipd: number): void {
+    // StereoCamera
+    if (!this._stereo) this._stereo = new THREE.StereoCamera();
+    this._stereo.eyeSep = ipd;
+
+    // Size RTs to the gate at current DPR — must share the renderRes aspect ratio.
+    // IMPORTANT: always recreate RTs and the compositor so TextureNodes hold fresh refs.
+    //   Calling setSize() on an existing RT recreates its texture object, which would
+    //   silently break the TSL TextureNode that captured the old reference.
+    const gate = this._gateViewport();
+    const dpr  = window.devicePixelRatio;
+    const w    = Math.max(1, Math.round(gate.w * dpr));
+    const h    = Math.max(1, Math.round(gate.h * dpr));
+
+    this._leftRT?.dispose();
+    this._rightRT?.dispose();
+    this._compMat?.dispose();
+
+    this._leftRT  = new THREE.WebGLRenderTarget(w, h);
+    this._rightRT = new THREE.WebGLRenderTarget(w, h);
+
+    const leftTex  = tslTexture(this._leftRT.texture);
+    const rightTex = tslTexture(this._rightRT.texture);
+    this._compMat  = new MeshBasicNodeMaterial();
+    this._compMat.colorNode = vec4(leftTex.r, rightTex.g, rightTex.b, float(1));
+
+    this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._quadScene  = new THREE.Scene();
+    // RenderTarget pixels are stored bottom-up; flip UV.y so the image is right-side up
+    const geo = new THREE.PlaneGeometry(2, 2);
+    const uvAttr = geo.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < uvAttr.count; i++) uvAttr.setY(i, 1 - uvAttr.getY(i));
+    this._quadScene.add(new THREE.Mesh(geo, this._compMat));
+  }
+
+  private _destroyAnaglyphResources(): void {
+    this._leftRT?.dispose();
+    this._rightRT?.dispose();
+    this._compMat?.dispose();
+    this._leftRT     = null;
+    this._rightRT    = null;
+    this._compMat    = null;
+    this._quadScene  = null;
+    this._quadCamera = null;
+    // _stereo is lightweight — keep for reuse
+  }
 
   // ── Public control API ─────────────────────────────────────────────────────
 
@@ -1210,7 +1372,8 @@ export class ViewportManager {
     this.isRendering = false;
     this.frameListeners.clear();
     this.cameraFrameListeners.clear();
-    window.removeEventListener('resize', this.onResize);
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     window.removeEventListener('keydown', this.onWindowKeyDown);
     this.container.removeEventListener('keydown', this.onKeyDown);
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
