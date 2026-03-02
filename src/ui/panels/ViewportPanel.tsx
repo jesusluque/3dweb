@@ -138,6 +138,7 @@ export const ViewportPanel: React.FC = () => {
     const onLighting    = (e: Event) => vm.setLightingEnabled((e as CustomEvent<boolean>).detail);
     const onSpace       = (e: Event) => vm.setTransformSpace((e as CustomEvent).detail);
     const onGizmoSize   = (e: Event) => vm.setGizmoSize((e as CustomEvent<number>).detail);
+    const onBgColor     = (e: Event) => vm.setBackgroundColor((e as CustomEvent<string>).detail);
     const onCreate      = (e: Event) => {
       vm.createPrimitive((e as CustomEvent).detail);
       markSceneDirty();
@@ -202,6 +203,10 @@ export const ViewportPanel: React.FC = () => {
     viewportBus.addEventListener('setLightingEnabled',onLighting);
     viewportBus.addEventListener('setTransformSpace', onSpace);
     viewportBus.addEventListener('setGizmoSize',      onGizmoSize);
+    viewportBus.addEventListener('setBgColor',         onBgColor);
+    viewportBus.addEventListener('setOutlineEnabled', (e: Event) => vm.setOutlineEnabled((e as CustomEvent<boolean>).detail));
+    viewportBus.addEventListener('setOutlineColor',   (e: Event) => vm.setOutlineColor((e as CustomEvent<string>).detail));
+    viewportBus.addEventListener('setOutlineWidth',   (e: Event) => vm.setOutlineWidth((e as CustomEvent<number>).detail));
     sceneBus   .addEventListener('createPrimitive',   onCreate);
     sceneBus   .addEventListener('createCamera',      onCreateCamera);
     sceneBus   .addEventListener('groupSelected',      onGroupSelected);
@@ -221,6 +226,8 @@ export const ViewportPanel: React.FC = () => {
       viewportBus.removeEventListener('setLightingEnabled',onLighting);
       viewportBus.removeEventListener('setTransformSpace', onSpace);
       viewportBus.removeEventListener('setGizmoSize',      onGizmoSize);
+      viewportBus.removeEventListener('setBgColor',         onBgColor);
+      // outline listeners are anonymous — they auto-clean when vm is disposed
       sceneBus   .removeEventListener('createPrimitive',   onCreate);
       sceneBus   .removeEventListener('createCamera',      onCreateCamera);
       sceneBus   .removeEventListener('groupSelected',     onGroupSelected);

@@ -210,7 +210,7 @@ export const MenuBar: React.FC = () => {
   const toggleSnap = () => { const n = !vs.snapGrid; updateVS({ snapGrid: n }); dispatchViewport.setSnapGrid(n ? 0.5 : null); };
   const toggleSnapV = () => { const n = !vs.snapVertex; updateVS({ snapVertex: n }); dispatchViewport.setSnapVertex(n); };
   const setSpace = (s: 'world' | 'local') => { updateVS({ transformSpace: s }); dispatchViewport.setTransformSpace(s); };
-  const setBgColor = (c: string) => { updateVS({ bgColor: c }); };
+  const setBgColor = (c: string) => { updateVS({ bgColor: c }); dispatchViewport.setBgColor(c); };
   const setRes = (w: number, h: number, label: string) => {
     updateVS({ renderRes: { w, h, label } });
     const vm = useAppStore.getState().viewportManager;
@@ -361,6 +361,8 @@ export const MenuBar: React.FC = () => {
     {
       label: 'Settings',
       items: [
+        { label: 'Settings…', shortcut: '⌘,', action: () => useAppStore.getState().openSettingsPanel() },
+        { divider: true } as MenuItem,
         {
           label: 'Viewport',
           submenu: [

@@ -21,6 +21,10 @@ export const dispatchViewport = {
   setLightingEnabled: (v: boolean)                  => viewportBus.dispatchEvent(new CustomEvent('setLightingEnabled', { detail: v })),
   setTransformSpace:  (s: 'world' | 'local')        => viewportBus.dispatchEvent(new CustomEvent('setTransformSpace',  { detail: s })),
   setGizmoSize:       (size: number)                 => viewportBus.dispatchEvent(new CustomEvent('setGizmoSize',       { detail: size })),
+  setBgColor:         (color: string)                => viewportBus.dispatchEvent(new CustomEvent('setBgColor',         { detail: color })),
+  setOutlineEnabled:  (v: boolean)                  => viewportBus.dispatchEvent(new CustomEvent('setOutlineEnabled',  { detail: v })),
+  setOutlineColor:    (color: string)                => viewportBus.dispatchEvent(new CustomEvent('setOutlineColor',    { detail: color })),
+  setOutlineWidth:    (px: number)                   => viewportBus.dispatchEvent(new CustomEvent('setOutlineWidth',    { detail: px })),
 };
 
 // ── Scene creation commands ────────────────────────────────────────────────────

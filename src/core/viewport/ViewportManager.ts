@@ -45,6 +45,16 @@ export class ViewportManager {
   private lightingEnabled = true;
   private currentShadingMode: 'smooth' | 'wireframe' | 'wireframe-on-shaded' = 'smooth';
   private wireframeOverlays: Map<string, THREE.LineSegments> = new Map();
+  /** Selection outline meshes keyed by the selected MeshNode UUID. */
+  private outlineMap: Map<string, THREE.Mesh> = new Map();
+  /** Bounding-sphere radius for each outline mesh, used for view-independent scaling. */
+  private outlineBoundingRadius: Map<string, number> = new Map();
+  /** Reusable vector to avoid per-frame allocations in the render loop. */
+  private _outlineTmpPos = new THREE.Vector3();
+  // Outline effect settings (mutable, exposed via public setters)
+  private outlineEnabled = true;
+  private outlineColorHex = '#d4aa30';   // maya-gold
+  private outlinePixels   = 2.5;         // desired screen-space thickness in px
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
 
@@ -384,6 +394,85 @@ export class ViewportManager {
       this.transformControls.detach();
       this.transformControls.enabled = false;
     }
+    this.updateOutlines();
+  }
+
+  /** Rebuild selection outlines to match the current selection set. */
+  private updateOutlines() {
+    const selected = new Set(
+      this.core.selectionManager.getSelection().map(n => n.uuid),
+    );
+
+    // Remove outlines for nodes that are no longer selected
+    for (const [uuid, outlineMesh] of [...this.outlineMap]) {
+      if (!selected.has(uuid)) {
+        outlineMesh.parent?.remove(outlineMesh);
+        outlineMesh.geometry.dispose();
+        (outlineMesh.material as THREE.Material).dispose();
+        this.outlineMap.delete(uuid);
+        this.outlineBoundingRadius.delete(uuid);
+      }
+    }
+
+    // If outlines are disabled don't create new ones (existing ones were just pruned above)
+    if (!this.outlineEnabled) return;
+
+    // Add outlines for newly selected MeshNode objects
+    for (const uuid of selected) {
+      if (this.outlineMap.has(uuid)) continue;          // already outlined
+      const obj = this.nodeMap.get(uuid);
+      if (!(obj instanceof THREE.Mesh)) continue;        // cameras / groups skipped
+
+      const outlineGeo = obj.geometry.clone();
+      // Compute bounding sphere once so per-frame scale can normalise by object size
+      outlineGeo.computeBoundingSphere();
+      const br = outlineGeo.boundingSphere?.radius ?? 1;
+
+      const outlineMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(this.outlineColorHex),
+        side:  THREE.BackSide,
+        depthWrite: false,
+      });
+      const outlineMesh = new THREE.Mesh(outlineGeo, outlineMat);
+      // Scale starts at 1; the render loop updates it each frame for view-independence
+      outlineMesh.scale.setScalar(1);
+      outlineMesh.name = `__outline_${uuid}`;
+      obj.add(outlineMesh);
+      this.outlineMap.set(uuid, outlineMesh);
+      this.outlineBoundingRadius.set(uuid, br);
+    }
+  }
+
+  /** Toggle selection outlines on / off. */
+  public setOutlineEnabled(v: boolean): void {
+    this.outlineEnabled = v;
+    if (!v) {
+      // Remove all current outline meshes immediately
+      for (const [uuid, outlineMesh] of [...this.outlineMap]) {
+        outlineMesh.parent?.remove(outlineMesh);
+        outlineMesh.geometry.dispose();
+        (outlineMesh.material as THREE.Material).dispose();
+        this.outlineMap.delete(uuid);
+        this.outlineBoundingRadius.delete(uuid);
+      }
+    } else {
+      // Rebuild outlines for the current selection
+      this.updateOutlines();
+    }
+  }
+
+  /** Change the outline colour (CSS hex string, e.g. '#d4aa30'). */
+  public setOutlineColor(hex: string): void {
+    this.outlineColorHex = hex;
+    const col = new THREE.Color(hex);
+    for (const [, outlineMesh] of this.outlineMap) {
+      (outlineMesh.material as THREE.MeshBasicMaterial).color.copy(col);
+    }
+  }
+
+  /** Set the desired screen-space thickness of the outline in pixels. */
+  public setOutlineWidth(px: number): void {
+    this.outlinePixels = Math.max(0.1, px);
   }
 
   private onResize = () => {
@@ -512,6 +601,24 @@ export class ViewportManager {
     // Update world matrices so helperCam.matrixWorld is current, then refresh frustum lines
     this.scene.updateMatrixWorld();
 
+    // ── View-independent outline scaling ─────────────────────────────────────
+    // Scale each outline mesh each frame so its screen-space thickness stays
+    // constant regardless of zoom / camera distance.
+    //   targetWorldOffset = OUTLINE_PIXELS * dist / focalLength
+    //   scale = 1 + targetWorldOffset / boundingRadius
+    if (this.outlineMap.size > 0) {
+      const fovRad  = THREE.MathUtils.degToRad(this.camera.fov);
+      const focalPx = (this.container.clientHeight / 2) / Math.tan(fovRad / 2);
+      for (const [uuid, outlineMesh] of this.outlineMap) {
+        outlineMesh.getWorldPosition(this._outlineTmpPos);
+        const dist = this.camera.position.distanceTo(this._outlineTmpPos);
+        const br = this.outlineBoundingRadius.get(uuid) ?? 1;
+        outlineMesh.scale.setScalar(
+          1 + (this.outlinePixels * dist) / (focalPx * Math.max(br, 0.001)),
+        );
+      }
+    }
+
     // Sync wireframe overlay transforms (they live at scene root, not as mesh children)
     for (const [meshUuid, ls] of this.wireframeOverlays) {
       const meshObj = this.scene.getObjectByProperty('uuid', meshUuid);
@@ -638,6 +745,14 @@ export class ViewportManager {
       wf.geometry.dispose();
       (wf.material as THREE.Material).dispose();
       this.wireframeOverlays.delete(uuid);
+    }
+    // Clean up selection outline (lives as a child of the mesh, removed with it)
+    const ol = this.outlineMap.get(uuid);
+    if (ol) {
+      ol.geometry.dispose();
+      (ol.material as THREE.Material).dispose();
+      this.outlineMap.delete(uuid);
+      this.outlineBoundingRadius.delete(uuid);
     }
     // Clean up camera helper
     const ch = this.cameraHelperMap.get(uuid);

@@ -2,6 +2,7 @@ import React from 'react';
 import { FloatingWindow } from './FloatingWindow';
 import { CameraMosaicOverlay } from './CameraMosaicOverlay';
 import { CameraViewPanel } from '../panels/CameraViewPanel';
+import { SettingsPanelContent } from '../panels/SettingsPanelContent';
 import { useAppStore } from '../store/useAppStore';
 import { Camera } from 'lucide-react';
 import { CameraNode } from '../../core/dag/CameraNode';
@@ -20,6 +21,8 @@ export const FloatingWindowManager: React.FC = () => {
   const restoreFloatingWindow  = useAppStore(s => s.restoreFloatingWindow);
   const cameraMosaicMode        = useAppStore(s => s.cameraMosaicMode);
   const toggleCameraMosaic      = useAppStore(s => s.toggleCameraMosaic);
+  const settingsPanelOpen       = useAppStore(s => s.settingsPanelOpen);
+  const closeSettingsPanel      = useAppStore(s => s.closeSettingsPanel);
   const selectedNodes          = useAppStore(s => s.selectedNodes);
 
   // Build a set of selected camera UUIDs for quick lookup
@@ -32,6 +35,23 @@ export const FloatingWindowManager: React.FC = () => {
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 90 }}>
+      {/* Settings panel window */}
+      {settingsPanelOpen && (
+        <FloatingWindow
+          id="__settings__"
+          title="Settings"
+          initialRect={{ x: 80, y: 60, w: 300, h: 540 }}
+          zIndex={700}
+          minimised={false}
+          highlighted={false}
+          onClose={closeSettingsPanel}
+          onFocus={() => {}}
+          onMinimise={closeSettingsPanel}
+        >
+          <SettingsPanelContent />
+        </FloatingWindow>
+      )}
+
       {/* Mosaic window */}
       {cameraMosaicMode && (
         <FloatingWindow

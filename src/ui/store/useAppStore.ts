@@ -29,6 +29,9 @@ export interface ViewportSettings {
   showGateMask: boolean;
   renderRes: { w: number; h: number; label: string };
   bgColor: string;
+  outlineEnabled: boolean;
+  outlineColor: string;
+  outlineWidth: number;
 }
 
 const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
@@ -42,6 +45,9 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   showGateMask: true,
   renderRes: { w: 1920, h: 1080, label: 'FHD 1920×1080' },
   bgColor: '#202020',
+  outlineEnabled: true,
+  outlineColor: '#d4aa30',
+  outlineWidth: 2.5,
 };
 
 interface AppState {
@@ -72,6 +78,10 @@ interface AppState {
   restoreFloatingWindow: (id: string) => void;
   /** Toggle the mosaic grid overlay for all camera views. */
   toggleCameraMosaic: () => void;
+  /** Whether the Settings floating panel is open. */
+  settingsPanelOpen: boolean;
+  openSettingsPanel: () => void;
+  closeSettingsPanel: () => void;
   /** Scene file operations */
   newScene: () => void;
   saveScene: () => Promise<void>;
@@ -87,6 +97,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sceneVersion: 0,
   floatingWindows: [],
   cameraMosaicMode: false,
+  settingsPanelOpen: false,
   viewportSettings: { ...DEFAULT_VIEWPORT_SETTINGS },
   currentFileHandle: null,
   currentFileName: 'untitled',
@@ -173,6 +184,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleCameraMosaic: () => {
     set(s => ({ cameraMosaicMode: !s.cameraMosaicMode }));
   },
+
+  openSettingsPanel:  () => set({ settingsPanelOpen: true }),
+  closeSettingsPanel: () => set({ settingsPanelOpen: false }),
 
   /* ════════════════════════════════════════════════════════════════════════
      Scene file operations
