@@ -243,6 +243,7 @@ export const ViewportPanel: React.FC = () => {
     viewportBus.addEventListener('setOutlineEnabled', (e: Event) => vm.setOutlineEnabled((e as CustomEvent<boolean>).detail));
     viewportBus.addEventListener('setOutlineColor',   (e: Event) => vm.setOutlineColor((e as CustomEvent<string>).detail));
     viewportBus.addEventListener('setOutlineWidth',   (e: Event) => vm.setOutlineWidth((e as CustomEvent<number>).detail));
+    viewportBus.addEventListener('setSplatOpt',       (e: Event) => vm.setSplatOpt((e as CustomEvent).detail));
     sceneBus   .addEventListener('createPrimitive',   onCreate);
     sceneBus   .addEventListener('createCamera',      onCreateCamera);
     sceneBus   .addEventListener('createLight',       onCreateLight);

@@ -15,6 +15,26 @@ import * as THREE from 'three';
 import type { SplatData } from 'gsplat';
 
 // ---------------------------------------------------------------------------
+// Optimisation options (mirrored from SplatOptSettings in buses.ts;
+// kept as a local type to avoid a core→ui import cycle).
+// ---------------------------------------------------------------------------
+export interface SplatOpts {
+  workerSort:     boolean;
+  radixSort:      boolean;  // reserved — affects worker-side sort algorithm
+  lazyResort:     boolean;
+  throttle:       boolean;
+  alphaThreshold: number;   // 0 = disabled
+}
+
+export const DEFAULT_SPLAT_OPTS: SplatOpts = {
+  workerSort:     true,
+  radixSort:      true,
+  lazyResort:     true,
+  throttle:       true,
+  alphaThreshold: 0,
+};
+
+// ---------------------------------------------------------------------------
 // GLSL shaders
 // ---------------------------------------------------------------------------
 
@@ -140,6 +160,8 @@ const fragmentShader = /* glsl */ `precision highp float;
 in  vec2 vUv;
 in  vec4 vColor;
 
+uniform float uAlphaThreshold;  // 0 = disabled; discard below this
+
 out vec4 fragColor;
 
 void main() {
@@ -147,6 +169,7 @@ void main() {
     if (r2 > 4.0) discard;                  // clip to circle of radius 2
 
     float alpha = exp(-r2) * vColor.a;      // Gaussian falloff × splat opacity
+    if (uAlphaThreshold > 0.0 && alpha < uAlphaThreshold) discard;
     fragColor = vec4(vColor.rgb, alpha);          // non-premultiplied
 }
 `;
@@ -243,6 +266,9 @@ export class SplatMesh extends THREE.Object3D {
     private _lastViewRow  = new Float32Array(4);
     private readonly _mvMatrix = new THREE.Matrix4();
 
+    // Optimisation options
+    private _opts: SplatOpts = { ...DEFAULT_SPLAT_OPTS };
+
     constructor() {
         super();
         this._buildGeometry();
@@ -269,11 +295,12 @@ export class SplatMesh extends THREE.Object3D {
             vertexShader,
             fragmentShader,
             uniforms: {
-                modelMatrix:      { value: new THREE.Matrix4() },
-                viewMatrix:       { value: new THREE.Matrix4() },
-                projectionMatrix: { value: new THREE.Matrix4() },
-                uFocal:           { value: new THREE.Vector2(500, 500) },
-                uViewport:        { value: new THREE.Vector2(1, 1) },
+                modelMatrix:       { value: new THREE.Matrix4() },
+                viewMatrix:        { value: new THREE.Matrix4() },
+                projectionMatrix:  { value: new THREE.Matrix4() },
+                uFocal:            { value: new THREE.Vector2(500, 500) },
+                uViewport:         { value: new THREE.Vector2(1, 1) },
+                uAlphaThreshold:   { value: 0 },
             },
             depthTest:   true,
             depthWrite:  false,
@@ -353,13 +380,12 @@ export class SplatMesh extends THREE.Object3D {
     // Called from ViewportManager._updateSplats() before the render pass.
     // -----------------------------------------------------------------------
     sort(camera: THREE.Camera): void {
-        if (this._count === 0 || !this._worker) return;
+        if (this._count === 0) return;
 
-        // 1. Apply last completed result to GPU buffers
+        // 1. Apply last completed worker result to GPU buffers
         if (this._gpuDirty && this._readyOrder) {
             this._applyOrder(this._readyOrder);
             this._gpuDirty = false;
-            // _readyOrder is still valid until we ping-pong it below
         }
 
         // 2. Compute row-2 of model-view matrix (the depth axis)
@@ -369,13 +395,23 @@ export class SplatMesh extends THREE.Object3D {
 
         // 3. Lazy skip — camera hasn't moved enough
         const lr = this._lastViewRow;
-        if (Math.abs(r0-lr[0])<1e-5 && Math.abs(r1-lr[1])<1e-5 &&
-            Math.abs(r2-lr[2])<1e-5 && Math.abs(r3-lr[3])<1e-5) return;
-
-        // 4. Throttle — only one sort in-flight at a time
-        if (this._sortInFlight) return;
+        if (this._opts.lazyResort) {
+            if (Math.abs(r0-lr[0])<1e-5 && Math.abs(r1-lr[1])<1e-5 &&
+                Math.abs(r2-lr[2])<1e-5 && Math.abs(r3-lr[3])<1e-5) return;
+        }
 
         lr[0]=r0; lr[1]=r1; lr[2]=r2; lr[3]=r3;
+
+        // 4a. Sync path (workerSort disabled)
+        if (!this._opts.workerSort || !this._worker) {
+            this._sortSync(r0, r1, r2, r3);
+            return;
+        }
+
+        // 4b. Worker path
+        // 4. Throttle — only one sort in-flight at a time
+        if (this._opts.throttle && this._sortInFlight) return;
+
         this._sortInFlight = true;
 
         // 5. Ping-pong: transfer the last result buffer back to worker (zero-copy)
@@ -389,6 +425,43 @@ export class SplatMesh extends THREE.Object3D {
             transfers.push(reclaimBuf);
         }
         this._worker.postMessage(msg, transfers);
+    }
+
+    // -----------------------------------------------------------------------
+    // Synchronous sort fallback (workerSort = false)
+    // -----------------------------------------------------------------------
+    private _sortSync(r0: number, r1: number, r2: number, r3: number): void {
+        const n   = this._count;
+        const pos = this._positions;
+        const indices: number[] = new Array(n);
+        for (let i = 0; i < n; i++) indices[i] = i;
+        // Ascending z = back-to-front (camera looks along -Z → more negative = farther)
+        indices.sort((a, b) =>
+            (r0*pos[3*a] + r1*pos[3*a+1] + r2*pos[3*a+2] + r3) -
+            (r0*pos[3*b] + r1*pos[3*b+1] + r2*pos[3*b+2] + r3)
+        );
+        this._applyOrder(new Uint32Array(indices));
+    }
+
+    // -----------------------------------------------------------------------
+    // Apply/update optimisation options at runtime.
+    // -----------------------------------------------------------------------
+    setOptions(opts: SplatOpts): void {
+        const wasWorker = this._opts.workerSort;
+        this._opts = { ...opts };
+
+        // Alpha threshold uniform
+        this._material.uniforms.uAlphaThreshold.value = opts.alphaThreshold;
+
+        // Worker ↔ sync switch
+        if (wasWorker && !opts.workerSort && this._worker) {
+            this._worker.terminate();
+            this._worker = null;
+            this._sortInFlight = false;
+        }
+        if (!wasWorker && opts.workerSort && this._count > 0) {
+            this._startWorker(new Float32Array(this._positions).buffer);
+        }
     }
 
     // -----------------------------------------------------------------------

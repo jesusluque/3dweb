@@ -7,6 +7,7 @@ let _selectSettingsTabFn: (() => void) | null = null;
 import { DAGNode } from '../../core/dag/DAGNode';
 import { ViewportManager } from '../../core/viewport/ViewportManager';
 import { Serializer, SerializedScene } from '../../core/system/Serializer';
+import { type SplatOptSettings, DEFAULT_SPLAT_OPT } from '../buses';
 
 // ── Floating window state ───────────────────────────────────────────────
 export interface FloatingWindowState {
@@ -41,7 +42,11 @@ export interface ViewportSettings {
   /** Renderer back-end: 'webgpu' uses WebGPURenderer (with auto WebGL2 fallback),
    *  'webgl' forces the classic THREE.WebGLRenderer for maximum compatibility. */
   rendererType: 'webgpu' | 'webgl';
+  /** Gaussian Splat rendering optimizations. */
+  splatOpt: SplatOptSettings;
 }
+
+export type { SplatOptSettings };
 
 const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   showGrid: true,
@@ -60,6 +65,7 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   anaglyphEnabled: false,
   anaglyphIPD: 0.064,
   rendererType: 'webgl',
+  splatOpt: { ...DEFAULT_SPLAT_OPT },
 };
 
 interface AppState {

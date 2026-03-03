@@ -4,7 +4,7 @@ import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu';
 // @ts-ignore
 import { texture as tslTexture, vec4, float } from 'three/tsl';
 import * as SPLAT from 'gsplat';
-import { SplatMesh } from './SplatMesh';
+import { SplatMesh, type SplatOpts, DEFAULT_SPLAT_OPTS } from './SplatMesh';
 import { EngineCore } from '../EngineCore';
 import { CameraNode } from '../dag/CameraNode';
 import { DAGNode } from '../dag/DAGNode';
@@ -101,6 +101,8 @@ export class ViewportManager {
   // ── Native Gaussian Splatting (SplatMesh – shares three.js depth buffer) ────
   /** Maps SplatNode UUID → the SplatMesh currently in the three.js scene. */
   private _splatMeshMap: Map<string, SplatMesh> = new Map();
+  /** Current splat optimisation options applied to every SplatMesh. */
+  private _splatOpts: SplatOpts = { ...DEFAULT_SPLAT_OPTS };
 
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
@@ -589,6 +591,16 @@ export class ViewportManager {
     this.outlinePixels = Math.max(0.1, px);
   }
 
+  // ── Gaussian Splat optimisations ────────────────────────────────────────
+
+  /** Apply splat optimisation options to all active and future SplatMesh instances. */
+  public setSplatOpt(opts: SplatOpts): void {
+    this._splatOpts = { ...opts };
+    for (const mesh of this._splatMeshMap.values()) {
+      mesh.setOptions(this._splatOpts);
+    }
+  }
+
   // ── Anaglyph 3D ─────────────────────────────────────────────────────────
 
   /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
@@ -798,6 +810,7 @@ export class ViewportManager {
             : SPLAT.Loader.LoadFromArrayBuffer(binary.buffer, tmpScene);
           const mesh = new SplatMesh();
           mesh.updateFromData(splatObj.data);
+          mesh.setOptions(this._splatOpts);
           node._splatObject = mesh;
           obj.add(mesh);
           this._splatMeshMap.set(node.uuid, mesh);
@@ -812,6 +825,7 @@ export class ViewportManager {
       if (node._splatObject) {
         // Already has a SplatMesh (e.g. redo) — re-attach to scene.
         const mesh = node._splatObject as SplatMesh;
+        mesh.setOptions(this._splatOpts);
         obj.add(mesh);
         this._splatMeshMap.set(node.uuid, mesh);
       } else if (node.fileData) {

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAppStore, ShadingModeType } from '../store/useAppStore';
+import { useAppStore, ShadingModeType, type SplatOptSettings } from '../store/useAppStore';
 import { dispatchViewport } from '../buses';
 import { RESOLUTION_PRESET_GROUPS } from '../data/resolutionPresets';
 
@@ -295,6 +295,7 @@ export const SettingsPanelContent: React.FC = () => {
   const [effectsOpen,   setEffectsOpen]   = useState(true);
   const [anaglyphOpen,  setAnaglyphOpen]  = useState(false);
   const [renderOpen,    setRenderOpen]    = useState(true);
+  const [splatOpen,     setSplatOpen]     = useState(true);
 
   const setShading = (m: ShadingModeType) => {
     updateVS({ shadingMode: m });
@@ -355,6 +356,12 @@ export const SettingsPanelContent: React.FC = () => {
   const setIPD = (v: number) => {
     updateVS({ anaglyphIPD: v });
     vm?.setAnaglyphIPD(v);
+  };
+
+  const updateSplatOpt = (patch: Partial<SplatOptSettings>) => {
+    const next = { ...vs.splatOpt, ...patch };
+    updateVS({ splatOpt: next });
+    dispatchViewport.setSplatOpt(next);
   };
 
   return (
@@ -499,6 +506,84 @@ export const SettingsPanelContent: React.FC = () => {
       <Sec title="Render" open={renderOpen} onToggle={() => setRenderOpen(v => !v)} />
       {renderOpen && (
         <ResolutionRow value={vs.renderRes} onChange={setRes} />
+      )}
+
+      {/* ── GAUSSIAN SPLAT ────────────────────────────────────────── */}
+      <Sec title="Gaussian Splat" tag="gsplat" open={splatOpen} onToggle={() => setSplatOpen(v => !v)} />
+      {splatOpen && (
+        <>
+          {/* Sub-header: active */}
+          <div style={{
+            padding: '3px 10px', fontSize: 9,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.green, letterSpacing: '0.4px', textTransform: 'uppercase',
+            background: C.bgRaise, borderBottom: `1px solid ${C.border}`,
+          }}>Active optimizations</div>
+
+          <ToggleRow
+            label="Worker Sort"
+            checked={vs.splatOpt.workerSort}
+            onChange={() => updateSplatOpt({ workerSort: !vs.splatOpt.workerSort })}
+          />
+          <ToggleRow
+            label="Radix Sort"
+            checked={vs.splatOpt.radixSort}
+            onChange={() => updateSplatOpt({ radixSort: !vs.splatOpt.radixSort })}
+          />
+          <ToggleRow
+            label="Lazy Re-sort"
+            checked={vs.splatOpt.lazyResort}
+            onChange={() => updateSplatOpt({ lazyResort: !vs.splatOpt.lazyResort })}
+          />
+          <ToggleRow
+            label="Throttle"
+            checked={vs.splatOpt.throttle}
+            onChange={() => updateSplatOpt({ throttle: !vs.splatOpt.throttle })}
+          />
+          <SliderRow
+            label="Alpha Threshold"
+            value={vs.splatOpt.alphaThreshold}
+            min={0} max={0.1} step={0.002}
+            onChange={v => updateSplatOpt({ alphaThreshold: v })}
+          />
+
+          {/* Sub-header: planned */}
+          <div style={{
+            padding: '3px 10px', fontSize: 9,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.orange, letterSpacing: '0.4px', textTransform: 'uppercase',
+            background: C.bgRaise, borderBottom: `1px solid ${C.border}`,
+          }}>Planned — splatter.app style</div>
+
+          {([
+            ['Frustum Culling', 'frustumCull', 'Per-splat view frustum cull'],
+            ['GPU Radix Sort',  'gpuSort',     'GPU-side O(n) sort via transform feedback'],
+            ['Streaming LOD',   'streamingLOD','Tile-based octree streaming (100M+ splats)'],
+          ] as [string, keyof SplatOptSettings, string][]).map(([label, key, hint]) => (
+            <div key={key} style={{
+              display: 'grid', gridTemplateColumns: '42% 1fr',
+              borderBottom: `1px solid ${C.border}`,
+              opacity: 0.45,
+            }}>
+              <div style={{
+                padding: '4px 8px', fontSize: 11, color: C.muted,
+                fontFamily: '"Segoe UI",system-ui,sans-serif',
+                display: 'flex', alignItems: 'center',
+                borderRight: `1px solid ${C.border}`, userSelect: 'none',
+              }} title={hint}>{label}</div>
+              <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Toggle
+                  checked={vs.splatOpt[key] as boolean}
+                  onChange={() => {}}
+                />
+                <span style={{
+                  fontSize: 8, color: C.orange,
+                  fontFamily: 'monospace', letterSpacing: '0.2px',
+                }}>PLANNED</span>
+              </div>
+            </div>
+          ))}
+        </>
       )}
 
     </div>
