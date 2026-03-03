@@ -26,7 +26,8 @@ export interface SplatOpts {
   alphaThreshold: number;
   frustumCull:    boolean;
   gpuIndirect:    boolean;
-  lodFactor:      number;   // 0.1–1.0
+  lodFactor:      number;   // 0.05–1.0
+  streamingLOD:   boolean;  // spatial-grid streaming LOD
 }
 
 export const DEFAULT_SPLAT_OPTS: SplatOpts = {
@@ -38,7 +39,123 @@ export const DEFAULT_SPLAT_OPTS: SplatOpts = {
   frustumCull:    false,
   gpuIndirect:    false,
   lodFactor:      1.0,
+  streamingLOD:   false,
 };
+
+// ---------------------------------------------------------------------------
+// SplatGrid — uniform 16³ spatial grid for streaming/spatial LOD.
+//
+// Built once in updateFromData.  Each frame, updateBudgets() computes a
+// per-cell render quota that scales quadratically with the cell's apparent
+// screen coverage: cells near the camera get full density; distant cells
+// are thinned to a small representative fraction.
+//
+// During _applyOrder the back-to-front traversal respects each cell's
+// budget: the first `budget[c]` splats from cell c are rendered, the rest
+// are skipped.  Because we traverse back-to-front, the skipped splats are
+// the ones that would be occluded anyway — correct blending is preserved.
+// ---------------------------------------------------------------------------
+class SplatGrid {
+    static readonly RES = 16;  // cells per axis → 16³ = 4 096 cells
+
+    /** Which grid cell splat i belongs to — index into cellCenter / budget / seen */
+    readonly cellOf:     Int32Array;
+    /** Total splat count in each cell — used as upper bound for budgets */
+    readonly cellCount:  Int32Array;
+    /** World-space centre of each cell (packed xyz): Float32Array[cell*3 .. +2] */
+    readonly cellCenter: Float32Array;
+    /** Per-frame render quota for each cell (how many splats to draw) */
+    readonly budget:     Int32Array;
+    /** Per-frame counter: splats drawn from each cell so far this frame */
+    readonly seen:       Int32Array;
+
+    private readonly _ncells: number;
+
+    constructor(positions: Float32Array, n: number) {
+        const RES = SplatGrid.RES;
+        const NC  = RES * RES * RES;
+        this._ncells    = NC;
+        this.cellOf     = new Int32Array(n);
+        this.cellCount  = new Int32Array(NC);
+        this.cellCenter = new Float32Array(NC * 3);
+        this.budget     = new Int32Array(NC);
+        this.seen       = new Int32Array(NC);
+
+        // 1. Compute AABB of the cloud
+        let minX=Infinity,  minY=Infinity,  minZ=Infinity;
+        let maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
+        for (let i = 0; i < n; i++) {
+            const x=positions[3*i], y=positions[3*i+1], z=positions[3*i+2];
+            if (x<minX) minX=x;  if (x>maxX) maxX=x;
+            if (y<minY) minY=y;  if (y>maxY) maxY=y;
+            if (z<minZ) minZ=z;  if (z>maxZ) maxZ=z;
+        }
+
+        // 2. Assign each splat to a cell
+        const eps  = 1e-4; // tiny pad so boundary splats don't fall into index RES
+        const invW = RES / (maxX - minX + eps);
+        const invH = RES / (maxY - minY + eps);
+        const invD = RES / (maxZ - minZ + eps);
+        const cellW = (maxX - minX + eps) / RES;
+        const cellH = (maxY - minY + eps) / RES;
+        const cellD = (maxZ - minZ + eps) / RES;
+
+        for (let i = 0; i < n; i++) {
+            const cx = Math.min(RES-1, Math.floor((positions[3*i  ] - minX) * invW));
+            const cy = Math.min(RES-1, Math.floor((positions[3*i+1] - minY) * invH));
+            const cz = Math.min(RES-1, Math.floor((positions[3*i+2] - minZ) * invD));
+            const c  = cx + cy * RES + cz * RES * RES;
+            this.cellOf[i] = c;
+            this.cellCount[c]++;
+        }
+
+        // 3. Cell centres (world space)
+        for (let cz=0; cz<RES; cz++)
+        for (let cy=0; cy<RES; cy++)
+        for (let cx=0; cx<RES; cx++) {
+            const c = cx + cy*RES + cz*RES*RES;
+            this.cellCenter[3*c  ] = minX + (cx + 0.5) * cellW;
+            this.cellCenter[3*c+1] = minY + (cy + 0.5) * cellH;
+            this.cellCenter[3*c+2] = minZ + (cz + 0.5) * cellD;
+        }
+    }
+
+    /**
+     * Recompute per-cell render budgets for the current camera position.
+     *
+     * viewRow  — MV matrix row 2: translates world pos to camera-Z.
+     * focal    — mean focal length in pixels: (fx + fy) / 2.
+     *
+     * Budget formula (quadratic screen-coverage falloff):
+     *   screenPx  = focal / |viewZ_of_cell_centre|   (≈ cell half-width in px)
+     *   fraction  = clamp(screenPx / TARGET_PX, MIN_FRAC, 1)²
+     *   budget[c] = max(1, ceil(cellCount[c] * fraction))
+     *
+     * TARGET_PX = 128: cells subtending ≥ 128 px → full density.
+     * MIN_FRAC  = 0.02: even the most distant cell renders at least 2% of its
+     *                    splats so the cloud silhouette is always visible.
+     */
+    updateBudgets(viewRow: Float32Array, focal: number): void {
+        const r0=viewRow[0], r1=viewRow[1], r2=viewRow[2], r3=viewRow[3];
+        const nc  = this._ncells;
+        const cen = this.cellCenter;
+        const bud = this.budget;
+        const cnt = this.cellCount;
+        const TARGET_PX = 128;
+        const MIN_FRAC  = 0.02;
+        for (let c = 0; c < nc; c++) {
+            if (cnt[c] === 0) { bud[c] = 0; continue; }
+            const viewZ = Math.abs(
+                r0*cen[3*c] + r1*cen[3*c+1] + r2*cen[3*c+2] + r3
+            );
+            const screenPx = focal / (viewZ < 0.01 ? 0.01 : viewZ);
+            const f   = Math.min(1.0, screenPx / TARGET_PX);
+            const frac = Math.max(MIN_FRAC, f * f);
+            bud[c] = Math.max(1, Math.ceil(cnt[c] * frac));
+        }
+        this.seen.fill(0); // reset frame counters here for locality
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GLSL shaders
@@ -363,6 +480,14 @@ export class SplatMesh extends THREE.Object3D {
     private readonly _cullPt       = new THREE.Vector3();
     private _tempOrder: Uint32Array | null = null;
 
+    // Screen-space LOD helpers — updated every frame, used in _applyOrder
+    private _maxScales:      Float32Array | null = null;  // max(sx,sy,sz) per splat, computed once
+    private _currentFocal    = 500;                        // px, mean of fx/fy, updated in updateUniforms
+    private _currentViewRow  = new Float32Array(4);        // MV row-2, updated in sort()
+
+    // Streaming / spatial-LOD grid — built once on load, queried every frame
+    private _grid: SplatGrid | null = null;
+
     // Async sort state
     private _worker:      Worker | null      = null;
     private _sortInFlight = false;
@@ -436,6 +561,18 @@ export class SplatMesh extends THREE.Object3D {
         this._positions = new Float32Array(data.positions);
         this._rotations = new Float32Array(data.rotations);
         this._scales    = new Float32Array(data.scales);
+
+        // Pre-compute per-splat max scale — used by the screen-space LOD filter.
+        // We take the largest of the 3 scale components; that's the dominant footprint axis.
+        const scl = this._scales;
+        this._maxScales = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const sx = scl[3*i], sy = scl[3*i+1], sz = scl[3*i+2];
+            this._maxScales[i] = sx > sy ? (sx > sz ? sx : sz) : (sy > sz ? sy : sz);
+        }
+
+        // Build spatial grid for streaming LOD (O(n), ~40 bytes/splat overhead)
+        this._grid = new SplatGrid(this._positions, n);
 
         const colorsU8 = data.colors;
         this._colors = new Float32Array(n * 4);
@@ -613,6 +750,8 @@ export class SplatMesh extends THREE.Object3D {
         }
 
         lr[0]=r0; lr[1]=r1; lr[2]=r2; lr[3]=r3;
+        this._currentViewRow[0]=r0; this._currentViewRow[1]=r1;
+        this._currentViewRow[2]=r2; this._currentViewRow[3]=r3;
 
         // 4a. Sync path (workerSort disabled)
         if (!this._opts.workerSort || !this._worker) {
@@ -698,49 +837,91 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
-    // _applyOrder: frustum-cull → LOD-slice → upload to GPU (direct or indirect)
-    // "order" is back-to-front: order[0]=farthest, order[n-1]=nearest.
+    // _applyOrder — single-pass: frustum-cull → screen-LOD → streaming-LOD → GPU
+    //
+    // "order" is back-to-front (order[0]=farthest).  All three filter stages
+    // share one preallocated _tempOrder buffer; they all run in one loop so
+    // cache pressure is minimised and no intermediate copies are needed.
+    //
+    // Filter semantics:
+    //   frustumCull  — drops splats whose world position is outside the view frustum.
+    //   lodFactor    — drops splats whose per-splat screen footprint < minPx.
+    //                  lodFactor 1.0 → minPx=0 (show all); 0.05 → minPx≈3.8 px.
+    //   streamingLOD — per-cell quadratic density falloff with camera distance.
+    //                  Near cells → full density; far cells → 2 %+ of splats.
+    //                  Maintains correct back-to-front blending in every cell.
     // -----------------------------------------------------------------------
     private _applyOrder(order: Uint32Array): void {
         const n = order.length;
         if (n === 0) { this._geometry.instanceCount = 0; return; }
 
+        const needFrustum = this._opts.frustumCull;
+        const needLOD     = this._opts.lodFactor < 1.0 && this._maxScales !== null;
+        const needStream  = this._opts.streamingLOD && this._grid !== null;
+
         let workOrder: Uint32Array = order;
         let workCount = n;
 
-        // 1. Frustum culling — build filtered list (reuse _tempOrder buffer)
-        if (this._opts.frustumCull) {
+        if (needFrustum || needLOD || needStream) {
             if (!this._tempOrder || this._tempOrder.length < n) {
                 this._tempOrder = new Uint32Array(n);
             }
-            let w = 0;
-            const f  = this._worldFrustum;
-            const pt = this._cullPt;
+            const tmp = this._tempOrder;
+
+            // Streaming LOD: compute per-cell budgets once (O(ncells) ≈ 4 096 iterations)
+            if (needStream) this._grid!.updateBudgets(this._currentViewRow, this._currentFocal);
+
+            const f  = needFrustum ? this._worldFrustum : null;
+            const pt = needFrustum ? this._cullPt       : null;
             const mw = this.matrixWorld;
-            const pos = this._positions;
+
+            const minPx = needLOD ? (1.0 - this._opts.lodFactor) * 4.0 : 0;
+            const focal = this._currentFocal;
+            const vr    = this._currentViewRow;
+            const r0=vr[0], r1=vr[1], r2=vr[2], r3=vr[3];
+            const pos   = this._positions;
+            const ms    = this._maxScales!;
+            const grid  = this._grid;
+
+            let w = 0;
             for (let j = 0; j < n; j++) {
                 const i = order[j];
-                pt.set(pos[3*i], pos[3*i+1], pos[3*i+2]);
-                pt.applyMatrix4(mw);
-                if (f.containsPoint(pt)) this._tempOrder[w++] = i;
+                const px=pos[3*i], py=pos[3*i+1], pz=pos[3*i+2];
+
+                // ── 1. Frustum cull ──────────────────────────────────────────
+                if (needFrustum) {
+                    pt!.set(px, py, pz).applyMatrix4(mw);
+                    if (!f!.containsPoint(pt!)) continue;
+                }
+
+                // ── 2. Per-splat screen-space LOD ────────────────────────────
+                if (needLOD) {
+                    const viewZ = r0*px + r1*py + r2*pz + r3;
+                    if (ms[i] * focal / Math.abs(viewZ) < minPx) continue;
+                }
+
+                // ── 3. Spatial streaming LOD — per-cell budget ───────────────
+                // Budget scales as coverage²: near cells → full density,
+                // far cells → fraction proportional to their screen footprint.
+                if (needStream) {
+                    const c = grid!.cellOf[i];
+                    if (grid!.seen[c] >= grid!.budget[c]) continue;
+                    grid!.seen[c]++;
+                }
+
+                tmp[w++] = i;
             }
-            workOrder = this._tempOrder;
+            workOrder = tmp;
             workCount = w;
         }
 
-        // 2. LOD — keep the nearest `lodFactor` fraction (end of back-to-front array)
-        let startIdx = 0;
-        let count    = workCount;
-        if (this._opts.lodFactor < 1.0) {
-            count    = Math.max(1, Math.ceil(workCount * this._opts.lodFactor));
-            startIdx = workCount - count; // skip farthest, keep nearest
-        }
+        if (workCount === 0) { this._geometry.instanceCount = 0; return; }
 
-        // 3. Upload
+        // ── 4. Upload ────────────────────────────────────────────────────────
         if (this._opts.gpuIndirect) {
-            this._uploadOrderIndirect(workOrder, startIdx, count);
+            this._uploadOrderIndirect(workOrder, 0, workCount);
         } else {
-            this._scatterDirect(workOrder, startIdx, count);
+            this._scatterDirect(workOrder, 0, workCount);
         }
     }
 
@@ -782,6 +963,9 @@ export class SplatMesh extends THREE.Object3D {
         const fy = (height / 2) / Math.tan(fovRad / 2);
         const fx = fy * camera.aspect;
 
+        // Store for screen-space LOD in _applyOrder
+        this._currentFocal = (fx + fy) * 0.5;
+
         const u = this._material.uniforms;
         u.modelMatrix.value.copy(this.matrixWorld);
         u.viewMatrix.value.copy(camera.matrixWorldInverse);
@@ -795,6 +979,7 @@ export class SplatMesh extends THREE.Object3D {
     override dispose(): void {
         this._worker?.terminate();
         this._worker = null;
+        this._grid   = null;
         this._disposeTextures();
         this._geometry.dispose();
         this._material.dispose();

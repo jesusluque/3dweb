@@ -557,46 +557,16 @@ export const SettingsPanelContent: React.FC = () => {
             onChange={v => updateSplatOpt({ alphaThreshold: v })}
           />
           <SliderRow
-            label="LOD Factor"
+            label="LOD (screen px)"
             value={vs.splatOpt.lodFactor}
             min={0.05} max={1.0} step={0.05}
             onChange={v => updateSplatOpt({ lodFactor: v })}
           />
-
-          {/* Sub-header: planned */}
-          <div style={{
-            padding: '3px 10px', fontSize: 9,
-            fontFamily: '"Segoe UI",system-ui,sans-serif',
-            color: C.orange, letterSpacing: '0.4px', textTransform: 'uppercase',
-            background: C.bgRaise, borderBottom: `1px solid ${C.border}`,
-          }}>Planned — splatter.app style</div>
-
-          {([
-            ['Streaming LOD', 'streamingLOD', 'Tile-based octree streaming (100M+ splats)'],
-          ] as [string, keyof SplatOptSettings, string][]).map(([label, key, hint]) => (
-            <div key={key} style={{
-              display: 'grid', gridTemplateColumns: '42% 1fr',
-              borderBottom: `1px solid ${C.border}`,
-              opacity: 0.45,
-            }}>
-              <div style={{
-                padding: '4px 8px', fontSize: 11, color: C.muted,
-                fontFamily: '"Segoe UI",system-ui,sans-serif',
-                display: 'flex', alignItems: 'center',
-                borderRight: `1px solid ${C.border}`, userSelect: 'none',
-              }} title={hint}>{label}</div>
-              <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Toggle
-                  checked={vs.splatOpt[key] as boolean}
-                  onChange={() => {}}
-                />
-                <span style={{
-                  fontSize: 8, color: C.orange,
-                  fontFamily: 'monospace', letterSpacing: '0.2px',
-                }}>PLANNED</span>
-              </div>
-            </div>
-          ))}
+          <ToggleRow
+            label="Streaming LOD"
+            checked={vs.splatOpt.streamingLOD}
+            onChange={() => updateSplatOpt({ streamingLOD: !vs.splatOpt.streamingLOD })}
+          />
         </>
       )}
 
