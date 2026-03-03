@@ -1,13 +1,14 @@
 /**
  * SplatMesh — native three.js Gaussian Splatting renderer.
  *
- * Renders 3D Gaussian splats as a THREE.Mesh using an InstancedBufferGeometry
- * and a RawShaderMaterial with GLSL3 shaders that share the WebGL2 depth buffer
- * with the rest of the three.js scene. This allows proper depth compositing
- * between geometry and splats.
- *
- * Sorting: front-to-back (ascending cam-space Z).
- * Blending: premultiplied front-to-back (src=ONE_MINUS_DST_ALPHA, dst=ONE).
+ * Acceleration tricks (mirroring gsplat):
+ *  1. Web Worker  — sort runs off the main thread; no per-frame stall.
+ *  2. Radix sort  — 4-pass 8-bit LSD radix sort O(4n) vs Array.sort O(n lg n).
+ *                   Single-pass histogram: all 4 byte-levels counted in one scan.
+ *  3. IEEE-754 key — all floats sortable as unsigned ints via bit-flip trick.
+ *  4. Ping-pong   — Uint32Array transferred zero-copy main↔worker every frame.
+ *  5. Throttle    — only one sort in-flight; keeps previous result until done.
+ *  6. Lazy re-sort — skips if camera view-row hasn't changed.
  */
 
 import * as THREE from 'three';
@@ -87,8 +88,8 @@ void main() {
     float z  = cam.z;   // negative in three.js (looking along -Z)
     float z2 = z * z;
     mat3 J = mat3(
-         uFocal.x / z,                       0.0,  -(uFocal.x * cam.x) / z2,
-         0.0,                          -uFocal.y / z,  (uFocal.y * cam.y) / z2,
+        -uFocal.x / z,                       0.0,  -(uFocal.x * cam.x) / z2,
+         0.0,                          -uFocal.y / z,  -(uFocal.y * cam.y) / z2,
          0.0,                                0.0,                         0.0
     );
 
@@ -151,59 +152,118 @@ void main() {
 `;
 
 // ---------------------------------------------------------------------------
+// Sort Worker — inlined as a Blob URL; no separate file needed.
+//
+// Protocol
+//   main→worker  { type:'init', positions:ArrayBuffer }  (transferred once)
+//   main→worker  { type:'sort', reclaimBuf?:ArrayBuffer } (every frame)
+//   worker→main  { order:Uint32Array }                   (transferred back)
+//   worker→main  { reclaim:ArrayBuffer }                 (throttled: buf returned)
+//
+// Algorithm: 4-pass 8-bit LSD radix sort on 32-bit depth keys.
+//   Key(z): ascending key order == ascending float order == back-to-front.
+//   For z<0 flip all bits; for z>=0 flip only sign bit (IEEE-754 trick).
+// ---------------------------------------------------------------------------
+
+/* eslint-disable */
+const WORKER_SOURCE = [
+  "'use strict';",
+  'var _pos=null,_n=0,_keys=null,_o0=null,_o1=null,_hist=null;',
+  'var _kb=new ArrayBuffer(4),_kf=new Float32Array(_kb),_ku=new Uint32Array(_kb);',
+  'function floatKey(z){_kf[0]=z;var b=_ku[0];return(b^(((b>>31)|0x80000000)>>>0))>>>0;}',
+  'function init(buf){_pos=new Float32Array(buf);_n=_pos.length/3;',
+  '  _keys=new Uint32Array(_n);_o0=new Uint32Array(_n);',
+  '  _o1=new Uint32Array(_n);_hist=new Int32Array(1024);}',
+  'var _vr=[0,0,0,0];',
+  'function radixSort(rb){',
+  '  var n=_n,pos=_pos,keys=_keys,hist=_hist,i,idx,b;',
+  '  var r0=_vr[0],r1=_vr[1],r2=_vr[2],r3=_vr[3];',
+  '  var out=null;',
+  '  if(rb){var t=new Uint32Array(rb);out=(t.length===n)?t:null;}',
+  '  if(!out)out=new Uint32Array(n);',
+  '  hist.fill(0);',
+  '  for(i=0;i<n;i++){var z=r0*pos[3*i]+r1*pos[3*i+1]+r2*pos[3*i+2]+r3;var k=floatKey(z);keys[i]=k;',
+  '    hist[(k)&255]++;hist[256+((k>>>8)&255)]++;',
+  '    hist[512+((k>>>16)&255)]++;hist[768+((k>>>24)&255)]++;}',
+  '  for(var p=0;p<4;p++){var sum=0,base=p*256;',
+  '    for(b=0;b<256;b++){var c=hist[base+b];hist[base+b]=sum;sum+=c;}}',
+  '  for(i=0;i<n;i++)out[i]=i;',
+  '  for(i=0;i<n;i++){idx=out[i];b=keys[idx]&255;         _o1[hist[b]++]=idx;}',
+  '  for(i=0;i<n;i++){idx=_o1[i]; b=(keys[idx]>>>8)&255;  out[hist[256+b]++]=idx;}',
+  '  for(i=0;i<n;i++){idx=out[i]; b=(keys[idx]>>>16)&255; _o1[hist[512+b]++]=idx;}',
+  '  for(i=0;i<n;i++){idx=_o1[i]; b=(keys[idx]>>>24)&255; out[hist[768+b]++]=idx;}',
+  '  return out;}',
+  'var _inFlight=false,_dirty=false,_pendingVr=null;',
+  'function doSort(rb){_inFlight=true;',
+  '  if(_pendingVr){_vr[0]=_pendingVr[0];_vr[1]=_pendingVr[1];_vr[2]=_pendingVr[2];_vr[3]=_pendingVr[3];_pendingVr=null;}',
+  '  try{var order=radixSort(rb);self.postMessage({order:order},[order.buffer]);}',
+  '  catch(e){self.postMessage({order:new Uint32Array(0)});}',
+  '  _inFlight=false;if(_dirty){_dirty=false;doSort(null);}}',
+  'self.onmessage=function(e){var d=e.data;',
+  "  if(d.type==='init'){init(d.positions);doSort(null);return;}",
+  "  if(d.type==='sort'){var rb=d.reclaimBuf||null;var vr=d.viewRow||null;",
+  '    if(vr)_pendingVr=vr;',
+  '    if(_inFlight){_dirty=true;if(rb)self.postMessage({reclaim:rb},[rb]);return;}',
+  '    doSort(rb);}};',
+].join('\n');
+/* eslint-enable */
+
+let _workerBlobUrl: string | null = null;
+function getWorkerUrl(): string {
+    if (!_workerBlobUrl) {
+        const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' });
+        _workerBlobUrl = URL.createObjectURL(blob);
+    }
+    return _workerBlobUrl;
+}
+
+// ---------------------------------------------------------------------------
 
 export class SplatMesh extends THREE.Object3D {
     private _geometry!: THREE.InstancedBufferGeometry;
     private _material!: THREE.RawShaderMaterial;
     private _mesh!: THREE.Mesh;
 
-    // instanced attribute buffers (typed-array views, re-uploaded each sort)
     private _count       = 0;
-    private _positions!: Float32Array;   // original (unsorted)
+    private _positions!: Float32Array;
     private _rotations!: Float32Array;
     private _scales!:    Float32Array;
     private _colors!:    Float32Array;
 
-    // GPU instanced buffers
     private _abCenter!:   THREE.InstancedBufferAttribute;
     private _abRotation!: THREE.InstancedBufferAttribute;
     private _abScale!:    THREE.InstancedBufferAttribute;
     private _abColor!:    THREE.InstancedBufferAttribute;
+
+    // Async sort state
+    private _worker:      Worker | null      = null;
+    private _sortInFlight = false;
+    private _gpuDirty     = false;
+    private _readyOrder:  Uint32Array | null = null;
+    private _lastViewRow  = new Float32Array(4);
+    private readonly _mvMatrix = new THREE.Matrix4();
 
     constructor() {
         super();
         this._buildGeometry();
         this._buildMaterial();
         this._mesh = new THREE.Mesh(this._geometry, this._material);
-        this._mesh.frustumCulled = false;   // we manage visibility ourselves
+        this._mesh.frustumCulled = false;
+        this._mesh.raycast = () => {}; // no position attribute — disable raycasting
         this.add(this._mesh);
     }
 
     // -----------------------------------------------------------------------
-    // Build base quad geometry
-    // -----------------------------------------------------------------------
+
     private _buildGeometry(): void {
         const geo = new THREE.InstancedBufferGeometry();
-
-        // Unit quad corners ±2 (two triangles)
-        const corners = new Float32Array([
-            -2, -2,
-             2, -2,
-             2,  2,
-            -2,  2,
-        ]);
-        const indices = [0, 1, 2,  0, 2, 3];
-
-        geo.setAttribute('aCorner', new THREE.BufferAttribute(corners, 2));
-        geo.setIndex(indices);
-
-        // Instanced attributes will be set in updateFromData / after first sort
+        geo.setAttribute('aCorner', new THREE.BufferAttribute(
+            new Float32Array([-2,-2, 2,-2, 2,2, -2,2]), 2,
+        ));
+        geo.setIndex([0,1,2, 0,2,3]);
         this._geometry = geo;
     }
 
-    // -----------------------------------------------------------------------
-    // Build material
-    // -----------------------------------------------------------------------
     private _buildMaterial(): void {
         this._material = new THREE.RawShaderMaterial({
             vertexShader,
@@ -215,31 +275,26 @@ export class SplatMesh extends THREE.Object3D {
                 uFocal:           { value: new THREE.Vector2(500, 500) },
                 uViewport:        { value: new THREE.Vector2(1, 1) },
             },
-            depthTest:  true,
-            depthWrite: false,       // don't write depth so splats don't self-occlude
+            depthTest:   true,
+            depthWrite:  false,
             transparent: true,
             side: THREE.DoubleSide,
-            // Standard back-to-front alpha blending — works against any solid background.
-            // (ONE_MINUS_DST_ALPHA/ONE only works when the framebuffer alpha is 0,
-            //  but three.js fills the background at alpha=1.)
             blending: THREE.NormalBlending,
             glslVersion: THREE.GLSL3,
         });
     }
 
     // -----------------------------------------------------------------------
-    // Load splat data from a gsplat SplatData object
+    // Called once after file is decoded
     // -----------------------------------------------------------------------
     updateFromData(data: SplatData): void {
         const n = data.vertexCount;
         this._count = n;
 
-        // Make local copies so we can sort without mutating SplatData
         this._positions = new Float32Array(data.positions);
         this._rotations = new Float32Array(data.rotations);
         this._scales    = new Float32Array(data.scales);
 
-        // Colors: SplatData.colors is Uint8Array [0,255], normalise to [0,1]
         const colorsU8 = data.colors;
         this._colors = new Float32Array(n * 4);
         for (let i = 0; i < n; i++) {
@@ -249,12 +304,10 @@ export class SplatMesh extends THREE.Object3D {
             this._colors[4*i+3] = colorsU8[4*i+3] / 255;
         }
 
-        // Allocate GPU instanced buffers (worst-case size, updated in sort)
         this._abCenter   = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
         this._abRotation = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
         this._abScale    = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
         this._abColor    = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
-
         this._abCenter.setUsage(THREE.DynamicDrawUsage);
         this._abRotation.setUsage(THREE.DynamicDrawUsage);
         this._abScale.setUsage(THREE.DynamicDrawUsage);
@@ -265,46 +318,89 @@ export class SplatMesh extends THREE.Object3D {
         this._geometry.setAttribute('aScale',    this._abScale);
         this._geometry.setAttribute('aColor',    this._abColor);
         this._geometry.instanceCount = n;
+
+        // Send a copy of positions to the worker (we keep the original here)
+        this._startWorker(new Float32Array(this._positions).buffer);
     }
 
     // -----------------------------------------------------------------------
-    // Sort splats by camera-space depth and upload sorted buffers to GPU.
-    // Call once per frame before rendering.
+
+    private _startWorker(positionsBuf: ArrayBuffer): void {
+        this._worker?.terminate();
+        this._sortInFlight = true; // worker will sort immediately on init
+
+        const w = new Worker(getWorkerUrl());
+        this._worker = w;
+
+        w.onmessage = (e: MessageEvent) => {
+            if (e.data.order) {
+                this._readyOrder   = e.data.order as Uint32Array;
+                this._sortInFlight = false;
+                this._gpuDirty     = true;
+            } else if (e.data.reclaim) {
+                // Throttled — worker returns the buffer; reclaim it
+                const buf = e.data.reclaim as ArrayBuffer;
+                if (buf.byteLength > 0) this._readyOrder = new Uint32Array(buf);
+                this._sortInFlight = false;
+            }
+        };
+
+        w.postMessage({ type: 'init', positions: positionsBuf }, [positionsBuf]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-frame entry point — apply result + dispatch next sort.
+    // Called from ViewportManager._updateSplats() before the render pass.
     // -----------------------------------------------------------------------
     sort(camera: THREE.Camera): void {
-        if (this._count === 0) return;
+        if (this._count === 0 || !this._worker) return;
 
-        const n      = this._count;
-        const pos    = this._positions;  // [x0,y0,z0, x1,y1,z1, ...]
-        const mvMat  = new THREE.Matrix4().multiplyMatrices(
-            camera.matrixWorldInverse,
-            this.matrixWorld,
-        );
-
-        // Compute camera-space Z for each splat
-        const depths = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
-            const wx = pos[3*i],   wy = pos[3*i+1], wz = pos[3*i+2];
-            // Row 2 of 4x4 matrix (column-major: elements [2], [6], [10], [14])
-            depths[i] = mvMat.elements[2]*wx + mvMat.elements[6]*wy
-                      + mvMat.elements[10]*wz + mvMat.elements[14];
+        // 1. Apply last completed result to GPU buffers
+        if (this._gpuDirty && this._readyOrder) {
+            this._applyOrder(this._readyOrder);
+            this._gpuDirty = false;
+            // _readyOrder is still valid until we ping-pong it below
         }
 
-        // Sort front-to-back: ascending depth (depth is negative in three.js,
-        // so most negative = furthest, least negative = closest).
-        // We want front-to-back for ONE_MINUS_DST_ALPHA blending.
-        const order = Array.from({ length: n }, (_, i) => i);
-        order.sort((a, b) => depths[a] - depths[b]);  // ascending = back-to-front for three.js -Z convention
+        // 2. Compute row-2 of model-view matrix (the depth axis)
+        this._mvMatrix.multiplyMatrices(camera.matrixWorldInverse, this.matrixWorld);
+        const el = this._mvMatrix.elements; // column-major
+        const r0=el[2], r1=el[6], r2=el[10], r3=el[14];
 
-        // Write sorted data into the instanced buffers
-        const bc = this._abCenter.array   as Float32Array;
-        const br = this._abRotation.array as Float32Array;
-        const bs = this._abScale.array    as Float32Array;
-        const bg = this._abColor.array    as Float32Array;
+        // 3. Lazy skip — camera hasn't moved enough
+        const lr = this._lastViewRow;
+        if (Math.abs(r0-lr[0])<1e-5 && Math.abs(r1-lr[1])<1e-5 &&
+            Math.abs(r2-lr[2])<1e-5 && Math.abs(r3-lr[3])<1e-5) return;
 
-        const rot = this._rotations;
-        const scl = this._scales;
-        const col = this._colors;
+        // 4. Throttle — only one sort in-flight at a time
+        if (this._sortInFlight) return;
+
+        lr[0]=r0; lr[1]=r1; lr[2]=r2; lr[3]=r3;
+        this._sortInFlight = true;
+
+        // 5. Ping-pong: transfer the last result buffer back to worker (zero-copy)
+        const reclaimBuf = this._readyOrder?.buffer;
+        this._readyOrder = null;
+
+        const msg: Record<string, unknown> = { type: 'sort', viewRow: [r0, r1, r2, r3] };
+        const transfers: Transferable[] = [];
+        if (reclaimBuf && reclaimBuf.byteLength > 0) {
+            msg.reclaimBuf = reclaimBuf;
+            transfers.push(reclaimBuf);
+        }
+        this._worker.postMessage(msg, transfers);
+    }
+
+    // -----------------------------------------------------------------------
+
+    private _applyOrder(order: Uint32Array): void {
+        const n   = this._count;
+        const pos = this._positions, rot = this._rotations;
+        const scl = this._scales,    col = this._colors;
+        const bc  = this._abCenter.array   as Float32Array;
+        const br  = this._abRotation.array as Float32Array;
+        const bs  = this._abScale.array    as Float32Array;
+        const bg  = this._abColor.array    as Float32Array;
 
         for (let j = 0; j < n; j++) {
             const i = order[j];
@@ -321,8 +417,7 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
-    // Update per-frame uniforms (call from ViewportManager each frame)
-    // -----------------------------------------------------------------------
+
     updateUniforms(
         camera: THREE.PerspectiveCamera,
         width: number,
@@ -341,9 +436,10 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
-    // Dispose GPU resources
-    // -----------------------------------------------------------------------
+
     override dispose(): void {
+        this._worker?.terminate();
+        this._worker = null;
         this._geometry.dispose();
         this._material.dispose();
     }
