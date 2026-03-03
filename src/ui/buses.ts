@@ -40,6 +40,8 @@ export const dispatchScene = {
     sceneBus.dispatchEvent(new CustomEvent<LightTypeEvent>('createLight', { detail: type })),
   importGltf: () =>
     sceneBus.dispatchEvent(new CustomEvent('importGltf')),
+  importSplat: () =>
+    sceneBus.dispatchEvent(new CustomEvent('importSplat')),
   groupSelected: () =>
     sceneBus.dispatchEvent(new CustomEvent('groupSelected')),
   ungroupSelected: () =>

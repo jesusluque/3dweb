@@ -5,6 +5,7 @@ import { CameraNode } from '../dag/CameraNode';
 import { GroupNode } from '../dag/GroupNode';
 import { LightNode } from '../dag/LightNode';
 import { GltfNode } from '../dag/GltfNode';
+import { SplatNode } from '../dag/SplatNode';
 
 /* ════════════════════════════════════════════════════════════════════════════
    Serialised data shapes
@@ -51,6 +52,11 @@ export class Serializer {
         // GltfNode: embed the binary asset as base64 so the scene is self-contained
         if (node instanceof GltfNode && (node as GltfNode).fileData) {
           (attributes as any).__fileData = (node as GltfNode).fileData;
+        }
+        // SplatNode: embed the binary asset as base64 so the scene is self-contained
+        if (node instanceof SplatNode) {
+          (attributes as any).__fileData   = (node as SplatNode).fileData;
+          (attributes as any).__fileFormat = (node as SplatNode).fileFormat;
         }
         nodes.push({
           uuid: node.uuid,
@@ -127,6 +133,13 @@ export class Serializer {
         if (s.attributes.fileName != null)  gn.fileName.setValue(s.attributes.fileName);
         if ((s.attributes as any).__fileData) gn.fileData = (s.attributes as any).__fileData;
         node = gn;
+      } else if (s.type === 'SplatNode') {
+        const sn = new SplatNode(s.name);
+        (sn as any).uuid = s.uuid;
+        if (s.attributes.fileName != null)         sn.fileName.setValue(s.attributes.fileName);
+        if ((s.attributes as any).__fileData)      sn.fileData   = (s.attributes as any).__fileData;
+        if ((s.attributes as any).__fileFormat)    sn.fileFormat = (s.attributes as any).__fileFormat;
+        node = sn;
       } else {
         // GroupNode or unknown → GroupNode
         node = new GroupNode(s.name);
