@@ -130,12 +130,23 @@ export const ViewportPanel: React.FC = () => {
 
   useEffect(() => {
     if (!containerRef.current || !core) return;
-    const vm = new ViewportManager(containerRef.current, core);
+    const vm = new ViewportManager(containerRef.current, core, { rendererType: vs.rendererType });
     vmRef.current = vm;
     vm.onSceneChanged = markSceneDirty;
     // Register in store so CameraViewPanel can subscribe to frame events
     setViewportManager(vm);
+    // Apply all current viewport settings to the freshly-created ViewportManager
     vm.setRenderResolution(vs.renderRes.w, vs.renderRes.h);
+    vm.setGridVisible(vs.showGrid);
+    vm.setLightingEnabled(vs.showLighting);
+    vm.setShadingMode(vs.shadingMode);
+    vm.setBackgroundColor(vs.bgColor);
+    vm.setOutlineEnabled(vs.outlineEnabled);
+    vm.setOutlineColor(vs.outlineColor);
+    vm.setOutlineWidth(vs.outlineWidth);
+    vm.setGizmoSize(vs.gizmoSize);
+    vm.setTransformSpace(vs.transformSpace);
+    if (vs.anaglyphEnabled) vm.setAnaglyphEnabled(true, vs.anaglyphIPD);
 
     // ── Connect toolbar buses → ViewportManager ──────────────────────────
     const onTool        = (e: Event) => vm.setTransformMode((e as CustomEvent).detail);
@@ -266,7 +277,8 @@ export const ViewportPanel: React.FC = () => {
       vm.dispose();
       setViewportManager(null);
     };
-  }, [core]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [core, vs.rendererType]);
 
   const cycleShadingMode = () => {
     const prev = vs.shadingMode;
@@ -525,6 +537,23 @@ export const ViewportPanel: React.FC = () => {
         </div>
 
         <div style={{ flex: 1 }} />
+
+        {/* Renderer type badge — shown when classic WebGL is active */}
+        {vs.rendererType === 'webgl' && (
+          <div style={{
+            pointerEvents: 'none',
+            fontSize: '10px',
+            color: '#d4a46e',
+            background: 'rgba(0,0,0,0.55)',
+            padding: '2px 7px',
+            borderRadius: '3px',
+            fontFamily: '"Segoe UI", system-ui, sans-serif',
+            letterSpacing: '0.04em',
+            marginRight: '4px',
+          }}>
+            &#9632; WebGL
+          </div>
+        )}
 
         {/* Anaglyph active badge */}
         {vs.anaglyphEnabled && (

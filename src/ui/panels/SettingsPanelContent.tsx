@@ -289,6 +289,7 @@ export const SettingsPanelContent: React.FC = () => {
 
   // Section open states
   const [viewportOpen,  setViewportOpen]  = useState(true);
+  const [rendererOpen,  setRendererOpen]  = useState(true);
   const [transformOpen, setTransformOpen] = useState(true);
   const [snappingOpen,  setSnappingOpen]  = useState(true);
   const [effectsOpen,   setEffectsOpen]   = useState(true);
@@ -362,7 +363,54 @@ export const SettingsPanelContent: React.FC = () => {
       display: 'flex', flexDirection: 'column',
       background: C.bg, overflowY: 'auto', overflowX: 'hidden',
     }}>
-
+      {/* ── RENDERER ────────────────────────────────────────────── */}
+      <Sec title="Renderer" tag="backend" open={rendererOpen} onToggle={() => setRendererOpen(v => !v)} accent />
+      {rendererOpen && (
+        <>
+          <RadioRow
+            label="Back-end"
+            options={[
+              { label: 'WebGPU', value: 'webgpu' },
+              { label: 'WebGL',  value: 'webgl'  },
+            ]}
+            value={vs.rendererType}
+            onChange={v => updateVS({ rendererType: v as 'webgpu' | 'webgl' })}
+          />
+          <div style={{
+            padding: '5px 10px',
+            fontSize: 10,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.dim,
+            borderBottom: `1px solid ${C.border}`,
+            lineHeight: 1.5,
+          }}>
+            {vs.rendererType === 'webgpu' ? (
+              <>
+                <span style={{ color: C.green }}>&#9679;</span>
+                {' WebGPU — enables TSL shaders & anaglyph compositor.'}
+                {' Falls back to WebGL2 automatically if GPU has no WebGPU support.'}
+              </>
+            ) : (
+              <>
+                <span style={{ color: C.orange }}>&#9679;</span>
+                {' Classic WebGL — maximum compatibility.'}
+                {' All geometry, lighting, clone and transform tools work normally.'}
+                {' Anaglyph uses AnaglyphEffect instead of TSL compositor.'}
+              </>
+            )}
+          </div>
+          <div style={{
+            padding: '4px 10px 5px',
+            fontSize: 9.5,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.muted,
+            fontStyle: 'italic',
+            borderBottom: `1px solid ${C.border}`,
+          }}>
+            Switching re-initialises the viewport while preserving scene objects.
+          </div>
+        </>
+      )}
       {/* ── VIEWPORT ──────────────────────────────────────────────── */}
       <Sec title="Viewport" open={viewportOpen} onToggle={() => setViewportOpen(v => !v)} />
       {viewportOpen && (

@@ -38,6 +38,9 @@ export interface ViewportSettings {
   outlineWidth: number;
   anaglyphEnabled: boolean;
   anaglyphIPD: number;            // Inter-Pupillary Distance in metres (default 0.064)
+  /** Renderer back-end: 'webgpu' uses WebGPURenderer (with auto WebGL2 fallback),
+   *  'webgl' forces the classic THREE.WebGLRenderer for maximum compatibility. */
+  rendererType: 'webgpu' | 'webgl';
 }
 
 const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
@@ -56,6 +59,7 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   outlineWidth: 2.5,
   anaglyphEnabled: false,
   anaglyphIPD: 0.064,
+  rendererType: 'webgl',
 };
 
 interface AppState {

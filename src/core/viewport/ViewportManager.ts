@@ -77,6 +77,20 @@ export class ViewportManager {
   private _quadCamera: THREE.OrthographicCamera | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _compMat:    any = null;  // MeshBasicNodeMaterial (three/webgpu)
+  /** Set when the RT dimensions are stale (e.g. after a resize) so the rebuild
+   *  is deferred to the start of the NEXT renderLoop tick, never mid-frame. */
+  private _anaglyphRTDirty = false;
+  /** True once the compositor shader pipeline has been compiled and the
+   *  composite pass is safe to run.  Set to false whenever resources are
+   *  rebuilt; set to true after renderer.compileAsync() resolves so the
+   *  first composite frame is never fed an uncompiled WebGPU pipeline. */
+  private _anaglyphReady = false;
+  /** requestAnimationFrame handle — kept so dispose() can cancel a pending tick. */
+  private _rafHandle = 0;
+  /** The active renderer back-end type for this viewport instance. */
+  private _rendererType: 'webgpu' | 'webgl' = 'webgpu';
+  /** Expose renderer type so consumers can inspect it. */
+  public get rendererType(): 'webgpu' | 'webgl' { return this._rendererType; }
   /** ResizeObserver watches the container so we resize exactly when the DOM
    *  element changes size (after flexlayout reflow), not on window.resize. */
   private _resizeObserver: ResizeObserver | null = null;
@@ -138,9 +152,10 @@ export class ViewportManager {
   }
   public getRenderResolution(): { w: number; h: number } { return this.renderResolution; }
 
-  constructor(container: HTMLElement, core: EngineCore) {
+  constructor(container: HTMLElement, core: EngineCore, options?: { rendererType?: 'webgpu' | 'webgl' }) {
     this.container = container;
     this.core = core;
+    this._rendererType = options?.rendererType ?? 'webgpu';
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x202020);
@@ -150,13 +165,20 @@ export class ViewportManager {
     this.camera.position.set(5, 5, 5);
     this.camera.lookAt(0, 0, 0);
 
-    // Setup WebGPURenderer with fallback
-    try {
-      this.renderer = new WebGPURenderer({ antialias: true });
-      console.log('WebGPU Renderer initialized');
-    } catch (e) {
-      console.warn('WebGPU not supported, falling back to WebGLRenderer');
+    // Setup renderer based on selected back-end type
+    if (this._rendererType === 'webgl') {
+      // Force classic WebGL renderer — maximum hardware compatibility, no TSL/WebGPU features
       this.renderer = new THREE.WebGLRenderer({ antialias: true });
+      console.log('Classic WebGL Renderer initialized');
+    } else {
+      // WebGPU mode (with automatic WebGL2 fallback inside WebGPURenderer)
+      try {
+        this.renderer = new WebGPURenderer({ antialias: true });
+        console.log('WebGPU Renderer initialized');
+      } catch (e) {
+        console.warn('WebGPU not supported, falling back to WebGLRenderer');
+        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+      }
     }
     
     this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
@@ -305,15 +327,22 @@ export class ViewportManager {
     // Bind Core selection events to view
     this.core.selectionManager.addListener(() => this.syncSelection());
 
-    // Defer the start of the render loop until the WebGPU backend is initialized
-    if (this.renderer.init) {
+    // Defer the start of the render loop until the renderer backend is ready
+    if (this._rendererType !== 'webgl' && this.renderer.init) {
       this.renderer.init().then(() => {
         this.core.logger.log('WebGPU renderer initialized successfully.', 'info');
+        this.isRendering = true;
         this.renderLoop();
       });
     } else {
-      this.core.logger.log('WebGL renderer initialized (WebGPU fallback).', 'warn');
-      this.renderLoop(); // WebGL fallback
+      this.core.logger.log(
+        this._rendererType === 'webgl'
+          ? 'Classic WebGL renderer initialized.'
+          : 'WebGL renderer initialized (WebGPU fallback).',
+        this._rendererType === 'webgl' ? 'info' : 'warn',
+      );
+      this.isRendering = true;
+      this.renderLoop();
     }
   }
 
@@ -559,8 +588,15 @@ export class ViewportManager {
   public setAnaglyphEnabled(enabled: boolean, ipd: number): void {
     this._anaglyphEnabled = enabled;
     if (enabled) {
-      this._buildAnaglyphResources(ipd);
+      // Initialise the StereoCamera here so IPD is ready, but defer actual
+      // RT/compositor creation to the start of the next renderLoop tick.
+      // This avoids WebGPU "texture already initialised" mid-frame errors and
+      // prevents reading uncleared GPU memory on the very first anaglyph frame.
+      if (!this._stereo) this._stereo = new THREE.StereoCamera();
+      this._stereo.eyeSep = ipd;
+      this._anaglyphRTDirty = true;
     } else {
+      this._anaglyphRTDirty = false;
       this._destroyAnaglyphResources();
     }
   }
@@ -580,7 +616,9 @@ export class ViewportManager {
     this.camera.updateProjectionMatrix();
     // RTs must match the new gate size so the compositor has no distortion.
     if (this._anaglyphEnabled && this._stereo) {
-      this._buildAnaglyphResources(this._stereo.eyeSep);
+      // Defer the RT rebuild to the start of the next render tick so
+      // we never mutate WebGPU resources mid-frame (causes "already initialized").
+      this._anaglyphRTDirty = true;
     }
   };
 
@@ -785,9 +823,17 @@ export class ViewportManager {
   }
 
   public renderLoop = () => {
-    this.isRendering = true;
-    requestAnimationFrame(this.renderLoop);
+    // Stop immediately if dispose() has been called — the renderer is already gone.
+    if (!this.isRendering) return;
+    this._rafHandle = requestAnimationFrame(this.renderLoop);
     this.controls.update();
+
+    // Flush deferred anaglyph RT rebuild BEFORE any rendering starts.
+    // This avoids mutating WebGPU textures mid-frame ("Texture already initialized").
+    if (this._anaglyphRTDirty && this._anaglyphEnabled && this._stereo) {
+      this._anaglyphRTDirty = false;
+      this._buildAnaglyphResources(this._stereo.eyeSep);
+    }
 
     // When looking through a CameraNode, sync the render camera each frame
     if (this.activeCamUuid) {
@@ -882,7 +928,20 @@ export class ViewportManager {
         camObj.getWorldPosition(this.camera.position);
         camObj.getWorldQuaternion(this.camera.quaternion);
 
+        // Render into the gate rect so the aspect ratio exactly matches the
+        // render resolution.  Without the gate constraint, the scene is
+        // stretched across the full (panel-sized) canvas and the crop that
+        // CameraViewPanel/CameraMosaicOverlay extracts will be geometrically
+        // distorted whenever the panel aspect ≠ render-resolution aspect.
+        const camGate = this._gateViewport();
+        this.renderer.setScissorTest(true);
+        this.renderer.setScissor(camGate.x, camGate.y, camGate.w, camGate.h);
+        this.renderer.setViewport(camGate.x, camGate.y, camGate.w, camGate.h);
+        this.renderer.autoClear = true;
         this.renderer.render(this.scene, this.camera);
+        this.renderer.setScissorTest(false);
+        this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+
         const src = this.renderer.domElement as HTMLCanvasElement;
         for (const cb of listeners) cb(src);
 
@@ -934,40 +993,58 @@ export class ViewportManager {
       // ── Anaglyph via render-target composite ─────────────────────────
       // Guard: if the panel was laid out after setAnaglyphEnabled fired (e.g.
       // React useEffect before flexlayout settles), the RT pixel dimensions may
-      // not match the current gate. Rebuild if they differ.
+      // not match the current gate. Schedule a rebuild for the next tick and
+      // skip the anaglyph pass this frame to avoid mid-frame WebGPU mutations.
       const dpr = window.devicePixelRatio;
       const gPW = Math.max(1, Math.round(gate.w * dpr));
       const gPH = Math.max(1, Math.round(gate.h * dpr));
       if (this._leftRT.width !== gPW || this._leftRT.height !== gPH) {
-        this._buildAnaglyphResources(this._stereo.eyeSep);
+        this._anaglyphRTDirty = true;
+        // Fall through to normal render for this frame
+      } else if (!this._anaglyphReady) {
+        // Pipeline not compiled yet — fall through to normal render this frame.
+        // (_anaglyphReady is set by compileAsync after _buildAnaglyphResources)
+      } else {
+        this._stereo.update(this.camera);
+
+        const prevAutoClear   = this.renderer.autoClear;
+        // Save and restore output colour space so the eye renders are stored as
+        // LINEAR in the RTs.  Without this the renderer gamma-encodes into the RT
+        // and then gamma-encodes again when compositing → colours appear too dark.
+        // Applied to both WebGL and WebGPU renderers — both expose outputColorSpace.
+        const prevColorSpace = this.renderer.outputColorSpace ?? null;
+        if (prevColorSpace !== null) {
+          this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+        }
+        this.renderer.autoClear = true;
+
+        // Render each eye into its own RT (no scissor needed — camera aspect is locked)
+        this.renderer.setRenderTarget(this._leftRT);
+        this.renderer.render(this.scene, this._stereo.cameraL);
+
+        this.renderer.setRenderTarget(this._rightRT);
+        this.renderer.render(this.scene, this._stereo.cameraR);
+
+        // Restore colour space before the composite pass so sRGB is applied once
+        if (prevColorSpace !== null) {
+          this.renderer.outputColorSpace = prevColorSpace;
+        }
+
+        // Back to screen — clear canvas then composite quad into gate area
+        this.renderer.setRenderTarget(null);
+        this.renderer.autoClear = false;
+        this.renderer.clear(true, true, true);   // clears full canvas (bars → bg colour)
+
+        this.renderer.setScissorTest(true);
+        this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
+        this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
+        this.renderer.render(this._quadScene, this._quadCamera);
+
+        this.renderer.setScissorTest(false);
+        this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+        this.renderer.autoClear = prevAutoClear;
+        return;
       }
-
-      this._stereo.update(this.camera);
-
-      const prevAutoClear = this.renderer.autoClear;
-      this.renderer.autoClear = true;
-
-      // Render each eye into its own RT (no scissor needed — camera aspect is locked)
-      this.renderer.setRenderTarget(this._leftRT);
-      this.renderer.render(this.scene, this._stereo.cameraL);
-
-      this.renderer.setRenderTarget(this._rightRT);
-      this.renderer.render(this.scene, this._stereo.cameraR);
-
-      // Back to screen — clear canvas then composite quad into gate area
-      this.renderer.setRenderTarget(null);
-      this.renderer.autoClear = false;
-      this.renderer.clear(true, true, true);   // clears full canvas (bars → bg colour)
-
-      this.renderer.setScissorTest(true);
-      this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
-      this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
-      this.renderer.render(this._quadScene, this._quadCamera);
-
-      this.renderer.setScissorTest(false);
-      this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
-      this.renderer.autoClear = prevAutoClear;
-      return;
     }
 
     // Normal render — clip to gate so nothing outside is drawn
@@ -985,9 +1062,7 @@ export class ViewportManager {
     this._stereo.eyeSep = ipd;
 
     // Size RTs to the gate at current DPR — must share the renderRes aspect ratio.
-    // IMPORTANT: always recreate RTs and the compositor so TextureNodes hold fresh refs.
-    //   Calling setSize() on an existing RT recreates its texture object, which would
-    //   silently break the TSL TextureNode that captured the old reference.
+    // IMPORTANT: always recreate RTs and the compositor so texture references stay fresh.
     const gate = this._gateViewport();
     const dpr  = window.devicePixelRatio;
     const w    = Math.max(1, Math.round(gate.w * dpr));
@@ -995,34 +1070,91 @@ export class ViewportManager {
 
     this._leftRT?.dispose();
     this._rightRT?.dispose();
-    this._compMat?.dispose();
+    (this._compMat as THREE.Material | null)?.dispose();
 
     this._leftRT  = new THREE.WebGLRenderTarget(w, h);
     this._rightRT = new THREE.WebGLRenderTarget(w, h);
 
-    const leftTex  = tslTexture(this._leftRT.texture);
-    const rightTex = tslTexture(this._rightRT.texture);
-    this._compMat  = new MeshBasicNodeMaterial();
-    this._compMat.colorNode = vec4(leftTex.r, rightTex.g, rightTex.b, float(1));
+    if (this._rendererType === 'webgl') {
+      // Classic WebGL: use a ShaderMaterial with the same simple channel split
+      // (left.r, right.g, right.b) so the output is identical to the WebGPU path.
+      this._compMat = new THREE.ShaderMaterial({
+        uniforms: {
+          mapLeft:  { value: this._leftRT.texture  },
+          mapRight: { value: this._rightRT.texture },
+        },
+        vertexShader: [
+          'varying vec2 vUv;',
+          'void main() {',
+          '  vUv = uv;',
+          '  gl_Position = vec4(position, 1.0);',
+          '}',
+        ].join('\n'),
+        fragmentShader: [
+          'uniform sampler2D mapLeft;',
+          'uniform sampler2D mapRight;',
+          'varying vec2 vUv;',
+          'void main() {',
+          // Eye RTs are rendered with LinearSRGBColorSpace so they hold linear values.
+          // Read them directly, do the channel split, then let #include <colorspace_fragment>
+          // apply exactly one sRGB encoding for the screen output.
+          '  vec4 l = texture2D(mapLeft,  vUv);',
+          '  vec4 r = texture2D(mapRight, vUv);',
+          '  gl_FragColor = vec4(l.r, r.g, r.b, 1.0);',
+          '  #include <colorspace_fragment>',
+          '}',
+        ].join('\n'),
+        depthTest: false,
+        depthWrite: false,
+      });
+    } else {
+      // WebGPU: TSL node material
+      const leftTex  = tslTexture(this._leftRT.texture);
+      const rightTex = tslTexture(this._rightRT.texture);
+      this._compMat  = new MeshBasicNodeMaterial();
+      this._compMat.colorNode = vec4(leftTex.r, rightTex.g, rightTex.b, float(1));
+    }
 
     this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._quadScene  = new THREE.Scene();
-    // RenderTarget pixels are stored bottom-up; flip UV.y so the image is right-side up
+    // WebGPU stores render-target texels with Y=0 at the top (NDC origin differs
+    // from OpenGL/WebGL where Y=0 is at the bottom). Flip UV.y on the quad
+    // geometry so the composite reads rows in the correct order.
+    // WebGL uses the same convention as PlaneGeometry UVs (no flip needed).
     const geo = new THREE.PlaneGeometry(2, 2);
-    const uvAttr = geo.attributes.uv as THREE.BufferAttribute;
-    for (let i = 0; i < uvAttr.count; i++) uvAttr.setY(i, 1 - uvAttr.getY(i));
+    if (this._rendererType !== 'webgl') {
+      const uvAttr = geo.attributes.uv as THREE.BufferAttribute;
+      for (let i = 0; i < uvAttr.count; i++) uvAttr.setY(i, 1 - uvAttr.getY(i));
+    }
     this._quadScene.add(new THREE.Mesh(geo, this._compMat));
+
+    // Pre-compile the compositor shader pipeline so the very first composite
+    // frame is never rendered with an unfinished (crushed/blank) WebGPU pipeline.
+    // Falls through to normal render until compilation completes.
+    // NOTE: compileAsync is only called for WebGPU — WebGL ShaderMaterial
+    // compiles synchronously and WebGLRenderer.compileAsync has known
+    // incompatibilities with ShaderMaterial (crashes on isReady check).
+    this._anaglyphReady = false;
+    if (this._rendererType !== 'webgl' && this._quadScene && this._quadCamera) {
+      this.renderer.compileAsync(this._quadScene, this._quadCamera)
+        .then(() => { this._anaglyphReady = true; })
+        .catch(() => { this._anaglyphReady = true; }); // best-effort fallback
+    } else {
+      // WebGL ShaderMaterial is ready synchronously
+      this._anaglyphReady = true;
+    }
   }
 
   private _destroyAnaglyphResources(): void {
     this._leftRT?.dispose();
     this._rightRT?.dispose();
-    this._compMat?.dispose();
+    (this._compMat as THREE.Material | null)?.dispose();
     this._leftRT     = null;
     this._rightRT    = null;
     this._compMat    = null;
     this._quadScene  = null;
     this._quadCamera = null;
+    this._anaglyphReady = false;
     // _stereo is lightweight — keep for reuse
   }
 
@@ -1686,6 +1818,7 @@ export class ViewportManager {
 
   public dispose() {
     this.isRendering = false;
+    cancelAnimationFrame(this._rafHandle);
     this.frameListeners.clear();
     this.cameraFrameListeners.clear();
     this._resizeObserver?.disconnect();
@@ -1695,6 +1828,7 @@ export class ViewportManager {
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
     this.transformControls.dispose();
     this.controls.dispose();
+    this._destroyAnaglyphResources();
     this.container.removeChild(this.renderer.domElement);
     this.renderer.dispose();
   }
