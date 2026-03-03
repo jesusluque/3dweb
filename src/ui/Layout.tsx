@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { Layout, Model, TabNode } from 'flexlayout-react';
+import React, { useRef, useEffect } from 'react';
+import { Actions, Layout, Model, TabNode } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { ViewportPanel } from './panels/ViewportPanel';
 import { OutlinerPanel } from './panels/OutlinerPanel';
@@ -10,6 +10,7 @@ import { FloatingWindowManager } from './components/FloatingWindowManager';
 import { StatusBar } from './panels/StatusBar';
 import { MenuBar } from './components/MenuBar';
 import { Toolbar } from './components/Toolbar';
+import { SettingsPanelContent } from './panels/SettingsPanelContent';
 import { useAppStore } from './store/useAppStore';
 
 const PlaceholderPanel: React.FC<{ title: string }> = ({ title }) => (
@@ -81,12 +82,13 @@ const json = {
         ]
       },
       {
-        // RIGHT — Attribute Editor / Node Editor
+        // RIGHT — Attribute Editor / Node Editor / Settings
         type: "tabset",
         weight: 25,
         children: [
           { type: "tab", name: "Attribute Editor", component: "attribute_editor", enableClose: false, enableFloat: false },
           { type: "tab", name: "Node Editor",      component: "node_editor",      enableClose: false, enableFloat: false },
+          { type: "tab", id: "#settings",          name: "Settings",             component: "settings",          enableClose: false, enableFloat: false },
         ]
       }
     ]
@@ -99,6 +101,13 @@ export const AppLayout: React.FC = () => {
   if (!model.current) model.current = Model.fromJson(json);
   const core = useAppStore((s) => s.core);
 
+  // Register the docked Settings tab selector so the store can focus it on demand.
+  useEffect(() => {
+    useAppStore.getState().registerSelectSettingsTab(() => {
+      model.current?.doAction(Actions.selectTab('#settings'));
+    });
+  }, []);
+
   const handleUndo = () => core?.commandHistory.undo();
   const handleRedo = () => core?.commandHistory.redo();
 
@@ -110,6 +119,7 @@ export const AppLayout: React.FC = () => {
     if (component === "attribute_editor") return <AttributeEditorPanel />;
     if (component === "console")          return <ConsolePanel />;
     if (component === "node_editor")      return <PlaceholderPanel title="Node Editor" />;
+    if (component === "settings")          return <SettingsPanelContent />;
     return <PlaceholderPanel title={node.getName()} />;
   };
 

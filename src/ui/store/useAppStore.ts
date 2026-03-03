@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import { EngineCore } from '../../core/EngineCore';
+
+// Module-level callback — set by Layout.tsx, called by openSettingsPanel().
+// Not reactive state on purpose so it never triggers re-renders.
+let _selectSettingsTabFn: (() => void) | null = null;
 import { DAGNode } from '../../core/dag/DAGNode';
 import { ViewportManager } from '../../core/viewport/ViewportManager';
 import { Serializer, SerializedScene } from '../../core/system/Serializer';
@@ -82,9 +86,11 @@ interface AppState {
   restoreFloatingWindow: (id: string) => void;
   /** Toggle the mosaic grid overlay for all camera views. */
   toggleCameraMosaic: () => void;
-  /** Whether the Settings floating panel is open. */
-  settingsPanelOpen: boolean;
+  /** Register the function that focuses the docked Settings tab in the layout. Internal use by Layout.tsx. */
+  registerSelectSettingsTab: (fn: () => void) => void;
+  /** Focus / bring-forward the docked Settings tab. */
   openSettingsPanel: () => void;
+  /** @deprecated kept for backward-compat – no-op. */
   closeSettingsPanel: () => void;
   /** Scene file operations */
   newScene: () => void;
@@ -101,7 +107,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   sceneVersion: 0,
   floatingWindows: [],
   cameraMosaicMode: false,
-  settingsPanelOpen: false,
   viewportSettings: { ...DEFAULT_VIEWPORT_SETTINGS },
   currentFileHandle: null,
   currentFileName: 'untitled',
@@ -189,8 +194,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(s => ({ cameraMosaicMode: !s.cameraMosaicMode }));
   },
 
-  openSettingsPanel:  () => set({ settingsPanelOpen: true }),
-  closeSettingsPanel: () => set({ settingsPanelOpen: false }),
+  // ── Settings docked tab ──────────────────────────────────────────────
+  // We store the selector callback as a plain variable so it doesn't
+  // trigger re-renders when set (it's not reactive state).
+  registerSelectSettingsTab: (fn: () => void) => {
+    _selectSettingsTabFn = fn;
+  },
+  openSettingsPanel: () => {
+    _selectSettingsTabFn?.();
+  },
+  closeSettingsPanel: () => { /* no-op – tab is always present in layout */ },
 
   /* ════════════════════════════════════════════════════════════════════════
      Scene file operations
