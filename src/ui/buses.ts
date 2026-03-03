@@ -7,7 +7,7 @@
 // ── Gaussian-Splat optimisation settings ──────────────────────────────────────
 /** All fields that control real-time Gaussian Splat rendering quality vs speed. */
 export interface SplatOptSettings {
-  // ── Currently active optimizations ────────────────────────────────────────
+  // ── Active optimizations ──────────────────────────────────────────────────
   /** Run the depth sort in a Web Worker (off-main-thread). */
   workerSort:     boolean;
   /** Use 4-pass 8-bit LSD radix sort O(4n) instead of Array.sort O(n log n). */
@@ -18,12 +18,14 @@ export interface SplatOptSettings {
   throttle:       boolean;
   /** Discard fragments whose Gaussian alpha is below this value (0 = disabled). */
   alphaThreshold: number;
-  // ── Planned / splatter.app-style — stub (UI only for now) ─────────────────
-  /** Per-splat frustum culling against the camera view frustum. [PLANNED] */
+  /** CPU-side 6-plane view-frustum culling before each upload (skips off-screen splats). */
   frustumCull:    boolean;
-  /** GPU-side radix sort via transform feedback / compute shaders. [PLANNED] */
-  gpuSort:        boolean;
-  /** Tile-based streaming LOD; load only visible chunks. [PLANNED] */
+  /** GPU-indirect instancing: encode splat data in textures; upload only sorted indices. */
+  gpuIndirect:    boolean;
+  /** LOD factor 0.1–1.0: render only the nearest lodFactor fraction of visible splats. */
+  lodFactor:      number;
+  // ── Planned ───────────────────────────────────────────────────────────────
+  /** Tile-based octree streaming; load only visible chunks. [PLANNED] */
   streamingLOD:   boolean;
 }
 
@@ -34,7 +36,8 @@ export const DEFAULT_SPLAT_OPT: SplatOptSettings = {
   throttle:       true,
   alphaThreshold: 0,
   frustumCull:    false,
-  gpuSort:        false,
+  gpuIndirect:    false,
+  lodFactor:      1.0,
   streamingLOD:   false,
 };
 

@@ -20,10 +20,13 @@ import type { SplatData } from 'gsplat';
 // ---------------------------------------------------------------------------
 export interface SplatOpts {
   workerSort:     boolean;
-  radixSort:      boolean;  // reserved — affects worker-side sort algorithm
+  radixSort:      boolean;
   lazyResort:     boolean;
   throttle:       boolean;
-  alphaThreshold: number;   // 0 = disabled
+  alphaThreshold: number;
+  frustumCull:    boolean;
+  gpuIndirect:    boolean;
+  lodFactor:      number;   // 0.1–1.0
 }
 
 export const DEFAULT_SPLAT_OPTS: SplatOpts = {
@@ -32,13 +35,16 @@ export const DEFAULT_SPLAT_OPTS: SplatOpts = {
   lazyResort:     true,
   throttle:       true,
   alphaThreshold: 0,
+  frustumCull:    false,
+  gpuIndirect:    false,
+  lodFactor:      1.0,
 };
 
 // ---------------------------------------------------------------------------
 // GLSL shaders
 // ---------------------------------------------------------------------------
 
-const vertexShader = /* glsl */ `precision highp float;
+const vertexShaderDirect = /* glsl */ `precision highp float;
 precision highp int;
 
 // Per-vertex (quad corner)
@@ -155,6 +161,90 @@ void main() {
 }
 `;
 
+// GPU-indirect variant: splat data lives in textures; only the sorted index list is
+// uploaded per frame.  aOrderF = float-encoded splat index (cast to int in shader).
+const vertexShaderIndirect = /* glsl */ `precision highp float;
+precision highp int;
+precision highp sampler2D;
+
+in vec2  aCorner;   // ±2 quad corner
+in float aOrderF;   // sorted splat index (float-encoded, cast to int in shader)
+
+// Static splat data textures (RGBA32F, updated only once on load)
+uniform highp sampler2D tCenter;    // .rgb = position xyz
+uniform highp sampler2D tRotation;  // .xyzw = quaternion XYZW
+uniform highp sampler2D tScale;     // .rgb = scale xyz
+uniform highp sampler2D tColor;     // .rgba = colour [0,1]
+uniform int  uTexWidth;             // texture row width (e.g. 2048)
+
+// Per-frame camera uniforms
+uniform mat4 modelMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 projectionMatrix;
+uniform vec2 uFocal;
+uniform vec2 uViewport;
+
+out vec2 vUv;
+out vec4 vColor;
+
+mat3 quatToMat(vec4 q) {
+    float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
+    float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
+    float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+    return mat3(
+        1.0-2.0*(yy+zz),   2.0*(xy-wz),   2.0*(xz+wy),
+          2.0*(xy+wz), 1.0-2.0*(xx+zz),   2.0*(yz-wx),
+          2.0*(xz-wy),   2.0*(yz+wx), 1.0-2.0*(xx+yy)
+    );
+}
+
+void main() {
+    int  splatIdx = int(aOrderF);
+    ivec2 tc      = ivec2(splatIdx % uTexWidth, splatIdx / uTexWidth);
+
+    vec3 aCenter   = texelFetch(tCenter,   tc, 0).rgb;
+    vec4 aRotation = texelFetch(tRotation, tc, 0);
+    vec3 aScale    = texelFetch(tScale,    tc, 0).rgb;
+    vec4 aColor    = texelFetch(tColor,    tc, 0);
+
+    vec4 worldPos4 = modelMatrix * vec4(aCenter, 1.0);
+    vec4 camPos4   = viewMatrix  * worldPos4;
+    vec3 cam = camPos4.xyz;
+    vec4 clipPos = projectionMatrix * camPos4;
+    if (clipPos.w <= 0.0) { gl_Position = vec4(0.0,0.0,2.0,1.0); return; }
+
+    mat3 R_local = quatToMat(normalize(aRotation));
+    mat3 M  = mat3(viewMatrix * modelMatrix) * R_local;
+    mat3 RS = mat3(aScale.x*M[0], aScale.y*M[1], aScale.z*M[2]);
+    mat3 Vrk = RS * transpose(RS);
+
+    float z = cam.z, z2 = z*z;
+    mat3 J = mat3(
+        -uFocal.x/z,        0.0,  -(uFocal.x*cam.x)/z2,
+         0.0,        -uFocal.y/z,  -(uFocal.y*cam.y)/z2,
+         0.0,               0.0,                     0.0
+    );
+    mat3 cov3d = transpose(J) * Vrk * J;
+
+    float A = cov3d[0][0]+0.3, B = cov3d[0][1], C = cov3d[1][1]+0.3;
+    float mid = (A+C)*0.5;
+    float disc = length(vec2((A-C)*0.5, B));
+    float lambda1 = mid+disc, lambda2 = mid-disc;
+    if (lambda2 < 0.0) { gl_Position = vec4(0.0,0.0,2.0,1.0); return; }
+
+    vec2 diag = normalize(vec2(B, lambda1-A));
+    vec2 majorAxis = min(sqrt(2.0*lambda1), 1024.0) * diag;
+    vec2 minorAxis = min(sqrt(2.0*lambda2), 1024.0) * vec2(diag.y, -diag.x);
+
+    vec2 ndcCenter = clipPos.xy / clipPos.w;
+    vec2 disp = (aCorner.x*majorAxis + aCorner.y*minorAxis) * 2.0 / uViewport;
+    gl_Position = vec4(ndcCenter + disp, clipPos.z/clipPos.w, 1.0);
+
+    vUv    = aCorner;
+    vColor = aColor;
+}
+`;
+
 const fragmentShader = /* glsl */ `precision highp float;
 
 in  vec2 vUv;
@@ -253,10 +343,25 @@ export class SplatMesh extends THREE.Object3D {
     private _scales!:    Float32Array;
     private _colors!:    Float32Array;
 
+    // Direct-mode instanced attributes (scatter per frame)
     private _abCenter!:   THREE.InstancedBufferAttribute;
     private _abRotation!: THREE.InstancedBufferAttribute;
     private _abScale!:    THREE.InstancedBufferAttribute;
     private _abColor!:    THREE.InstancedBufferAttribute;
+
+    // GPU-indirect mode (texture data + per-frame order indices only)
+    private _abOrder:    THREE.InstancedBufferAttribute | null = null;
+    private _tCenter:    THREE.DataTexture | null = null;
+    private _tRotation:  THREE.DataTexture | null = null;
+    private _tScale:     THREE.DataTexture | null = null;
+    private _tColor:     THREE.DataTexture | null = null;
+    private _texWidth  = 2048;
+
+    // Frustum culling helpers (re-used each frame to avoid GC pressure)
+    private readonly _worldFrustum = new THREE.Frustum();
+    private readonly _frustumPVM   = new THREE.Matrix4();
+    private readonly _cullPt       = new THREE.Vector3();
+    private _tempOrder: Uint32Array | null = null;
 
     // Async sort state
     private _worker:      Worker | null      = null;
@@ -290,18 +395,28 @@ export class SplatMesh extends THREE.Object3D {
         this._geometry = geo;
     }
 
-    private _buildMaterial(): void {
+    private _buildMaterial(indirect = false): void {
+        const baseUniforms: Record<string, { value: unknown }> = {
+            modelMatrix:       { value: new THREE.Matrix4() },
+            viewMatrix:        { value: new THREE.Matrix4() },
+            projectionMatrix:  { value: new THREE.Matrix4() },
+            uFocal:            { value: new THREE.Vector2(500, 500) },
+            uViewport:         { value: new THREE.Vector2(1, 1) },
+            uAlphaThreshold:   { value: this._opts.alphaThreshold },
+        };
+        if (indirect) {
+            Object.assign(baseUniforms, {
+                tCenter:   { value: this._tCenter },
+                tRotation: { value: this._tRotation },
+                tScale:    { value: this._tScale },
+                tColor:    { value: this._tColor },
+                uTexWidth: { value: this._texWidth },
+            });
+        }
         this._material = new THREE.RawShaderMaterial({
-            vertexShader,
+            vertexShader: indirect ? vertexShaderIndirect : vertexShaderDirect,
             fragmentShader,
-            uniforms: {
-                modelMatrix:       { value: new THREE.Matrix4() },
-                viewMatrix:        { value: new THREE.Matrix4() },
-                projectionMatrix:  { value: new THREE.Matrix4() },
-                uFocal:            { value: new THREE.Vector2(500, 500) },
-                uViewport:         { value: new THREE.Vector2(1, 1) },
-                uAlphaThreshold:   { value: 0 },
-            },
+            uniforms: baseUniforms,
             depthTest:   true,
             depthWrite:  false,
             transparent: true,
@@ -331,23 +446,16 @@ export class SplatMesh extends THREE.Object3D {
             this._colors[4*i+3] = colorsU8[4*i+3] / 255;
         }
 
-        this._abCenter   = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
-        this._abRotation = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
-        this._abScale    = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
-        this._abColor    = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
-        this._abCenter.setUsage(THREE.DynamicDrawUsage);
-        this._abRotation.setUsage(THREE.DynamicDrawUsage);
-        this._abScale.setUsage(THREE.DynamicDrawUsage);
-        this._abColor.setUsage(THREE.DynamicDrawUsage);
-
-        this._geometry.setAttribute('aCenter',   this._abCenter);
-        this._geometry.setAttribute('aRotation', this._abRotation);
-        this._geometry.setAttribute('aScale',    this._abScale);
-        this._geometry.setAttribute('aColor',    this._abColor);
-        this._geometry.instanceCount = n;
+        if (this._opts.gpuIndirect) {
+            this._enterIndirectMode();
+        } else {
+            this._enterDirectMode();
+        }
 
         // Send a copy of positions to the worker (we keep the original here)
-        this._startWorker(new Float32Array(this._positions).buffer);
+        if (this._opts.workerSort) {
+            this._startWorker(new Float32Array(this._positions).buffer);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -376,6 +484,101 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
+    // Mode setup helpers
+    // -----------------------------------------------------------------------
+
+    private _enterDirectMode(): void {
+        const n = this._count;
+        this._abCenter   = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
+        this._abRotation = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
+        this._abScale    = new THREE.InstancedBufferAttribute(new Float32Array(n*3), 3);
+        this._abColor    = new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4);
+        this._abCenter.setUsage(THREE.DynamicDrawUsage);
+        this._abRotation.setUsage(THREE.DynamicDrawUsage);
+        this._abScale.setUsage(THREE.DynamicDrawUsage);
+        this._abColor.setUsage(THREE.DynamicDrawUsage);
+
+        this._geometry.deleteAttribute('aOrderF');
+        this._geometry.setAttribute('aCenter',   this._abCenter);
+        this._geometry.setAttribute('aRotation', this._abRotation);
+        this._geometry.setAttribute('aScale',    this._abScale);
+        this._geometry.setAttribute('aColor',    this._abColor);
+        this._geometry.instanceCount = n;
+
+        this._disposeTextures();
+        this._abOrder = null;
+
+        this._material.dispose();
+        this._buildMaterial(false);
+        this._mesh.material = this._material;
+    }
+
+    private _enterIndirectMode(): void {
+        const n = this._count;
+        this._buildTextures();
+
+        this._abOrder = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+        this._abOrder.setUsage(THREE.DynamicDrawUsage);
+
+        this._geometry.deleteAttribute('aCenter');
+        this._geometry.deleteAttribute('aRotation');
+        this._geometry.deleteAttribute('aScale');
+        this._geometry.deleteAttribute('aColor');
+        this._geometry.setAttribute('aOrderF', this._abOrder);
+        this._geometry.instanceCount = n;
+
+        this._material.dispose();
+        this._buildMaterial(true);
+        this._mesh.material = this._material;
+
+        // Force re-apply on next sort result
+        this._gpuDirty = true;
+    }
+
+    private _buildTextures(): void {
+        const n  = this._count;
+        const tw = Math.min(n, 2048);
+        const th = Math.ceil(n / tw);
+        this._texWidth = tw;
+        const size = tw * th;
+
+        const posData = new Float32Array(size * 4);
+        const rotData = new Float32Array(size * 4);
+        const sclData = new Float32Array(size * 4);
+        const colData = new Float32Array(size * 4);
+        const pos = this._positions, rot = this._rotations;
+        const scl = this._scales,    col = this._colors;
+
+        for (let i = 0; i < n; i++) {
+            posData[4*i]   = pos[3*i];   posData[4*i+1] = pos[3*i+1]; posData[4*i+2] = pos[3*i+2];
+            rotData[4*i]   = rot[4*i];   rotData[4*i+1] = rot[4*i+1]; rotData[4*i+2] = rot[4*i+2]; rotData[4*i+3] = rot[4*i+3];
+            sclData[4*i]   = scl[3*i];   sclData[4*i+1] = scl[3*i+1]; sclData[4*i+2] = scl[3*i+2];
+            colData[4*i]   = col[4*i];   colData[4*i+1] = col[4*i+1]; colData[4*i+2] = col[4*i+2]; colData[4*i+3] = col[4*i+3];
+        }
+
+        const mkTex = (data: Float32Array): THREE.DataTexture => {
+            const t = new THREE.DataTexture(data, tw, th, THREE.RGBAFormat, THREE.FloatType);
+            t.magFilter = t.minFilter = THREE.NearestFilter;
+            t.generateMipmaps = false;
+            t.needsUpdate = true;
+            return t;
+        };
+
+        this._disposeTextures();
+        this._tCenter   = mkTex(posData);
+        this._tRotation = mkTex(rotData);
+        this._tScale    = mkTex(sclData);
+        this._tColor    = mkTex(colData);
+    }
+
+    private _disposeTextures(): void {
+        this._tCenter?.dispose();   this._tCenter   = null;
+        this._tRotation?.dispose(); this._tRotation = null;
+        this._tScale?.dispose();    this._tScale    = null;
+        this._tColor?.dispose();    this._tColor    = null;
+    }
+
+    // -----------------------------------------------------------------------
     // Per-frame entry point — apply result + dispatch next sort.
     // Called from ViewportManager._updateSplats() before the render pass.
     // -----------------------------------------------------------------------
@@ -400,6 +603,15 @@ export class SplatMesh extends THREE.Object3D {
                 Math.abs(r2-lr[2])<1e-5 && Math.abs(r3-lr[3])<1e-5) return;
         }
 
+        // Update world-space frustum planes for culling
+        if (this._opts.frustumCull) {
+            this._frustumPVM.multiplyMatrices(
+                (camera as THREE.PerspectiveCamera).projectionMatrix,
+                camera.matrixWorldInverse,
+            );
+            this._worldFrustum.setFromProjectionMatrix(this._frustumPVM);
+        }
+
         lr[0]=r0; lr[1]=r1; lr[2]=r2; lr[3]=r3;
 
         // 4a. Sync path (workerSort disabled)
@@ -408,8 +620,7 @@ export class SplatMesh extends THREE.Object3D {
             return;
         }
 
-        // 4b. Worker path
-        // 4. Throttle — only one sort in-flight at a time
+        // 4b. Worker path — throttle
         if (this._opts.throttle && this._sortInFlight) return;
 
         this._sortInFlight = true;
@@ -447,11 +658,33 @@ export class SplatMesh extends THREE.Object3D {
     // Apply/update optimisation options at runtime.
     // -----------------------------------------------------------------------
     setOptions(opts: SplatOpts): void {
-        const wasWorker = this._opts.workerSort;
+        const wasWorker   = this._opts.workerSort;
+        const wasIndirect = this._opts.gpuIndirect;
         this._opts = { ...opts };
 
         // Alpha threshold uniform
         this._material.uniforms.uAlphaThreshold.value = opts.alphaThreshold;
+
+        // GPU indirect mode switch (rebuilds geometry layout + material + textures)
+        if (opts.gpuIndirect !== wasIndirect && this._count > 0) {
+            if (opts.gpuIndirect) {
+                this._enterIndirectMode();
+            } else {
+                this._enterDirectMode();
+                // Force a re-sort so direct buffers get filled
+                this._lastViewRow.fill(0);
+            }
+        }
+
+        // Update texture uniform references if we just entered indirect mode
+        if (opts.gpuIndirect) {
+            const u = this._material.uniforms;
+            if (u.tCenter)   u.tCenter.value   = this._tCenter;
+            if (u.tRotation) u.tRotation.value = this._tRotation;
+            if (u.tScale)    u.tScale.value     = this._tScale;
+            if (u.tColor)    u.tColor.value     = this._tColor;
+            if (u.uTexWidth) u.uTexWidth.value  = this._texWidth;
+        }
 
         // Worker ↔ sync switch
         if (wasWorker && !opts.workerSort && this._worker) {
@@ -465,28 +698,77 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
-
+    // _applyOrder: frustum-cull → LOD-slice → upload to GPU (direct or indirect)
+    // "order" is back-to-front: order[0]=farthest, order[n-1]=nearest.
+    // -----------------------------------------------------------------------
     private _applyOrder(order: Uint32Array): void {
-        const n   = this._count;
+        const n = order.length;
+        if (n === 0) { this._geometry.instanceCount = 0; return; }
+
+        let workOrder: Uint32Array = order;
+        let workCount = n;
+
+        // 1. Frustum culling — build filtered list (reuse _tempOrder buffer)
+        if (this._opts.frustumCull) {
+            if (!this._tempOrder || this._tempOrder.length < n) {
+                this._tempOrder = new Uint32Array(n);
+            }
+            let w = 0;
+            const f  = this._worldFrustum;
+            const pt = this._cullPt;
+            const mw = this.matrixWorld;
+            const pos = this._positions;
+            for (let j = 0; j < n; j++) {
+                const i = order[j];
+                pt.set(pos[3*i], pos[3*i+1], pos[3*i+2]);
+                pt.applyMatrix4(mw);
+                if (f.containsPoint(pt)) this._tempOrder[w++] = i;
+            }
+            workOrder = this._tempOrder;
+            workCount = w;
+        }
+
+        // 2. LOD — keep the nearest `lodFactor` fraction (end of back-to-front array)
+        let startIdx = 0;
+        let count    = workCount;
+        if (this._opts.lodFactor < 1.0) {
+            count    = Math.max(1, Math.ceil(workCount * this._opts.lodFactor));
+            startIdx = workCount - count; // skip farthest, keep nearest
+        }
+
+        // 3. Upload
+        if (this._opts.gpuIndirect) {
+            this._uploadOrderIndirect(workOrder, startIdx, count);
+        } else {
+            this._scatterDirect(workOrder, startIdx, count);
+        }
+    }
+
+    private _scatterDirect(order: Uint32Array, start: number, count: number): void {
         const pos = this._positions, rot = this._rotations;
         const scl = this._scales,    col = this._colors;
         const bc  = this._abCenter.array   as Float32Array;
         const br  = this._abRotation.array as Float32Array;
         const bs  = this._abScale.array    as Float32Array;
         const bg  = this._abColor.array    as Float32Array;
-
-        for (let j = 0; j < n; j++) {
-            const i = order[j];
+        for (let j = 0; j < count; j++) {
+            const i = order[start + j];
             bc[3*j]=pos[3*i]; bc[3*j+1]=pos[3*i+1]; bc[3*j+2]=pos[3*i+2];
             br[4*j]=rot[4*i]; br[4*j+1]=rot[4*i+1]; br[4*j+2]=rot[4*i+2]; br[4*j+3]=rot[4*i+3];
             bs[3*j]=scl[3*i]; bs[3*j+1]=scl[3*i+1]; bs[3*j+2]=scl[3*i+2];
             bg[4*j]=col[4*i]; bg[4*j+1]=col[4*i+1]; bg[4*j+2]=col[4*i+2]; bg[4*j+3]=col[4*i+3];
         }
+        this._abCenter.needsUpdate = this._abRotation.needsUpdate =
+            this._abScale.needsUpdate = this._abColor.needsUpdate = true;
+        this._geometry.instanceCount = count;
+    }
 
-        this._abCenter.needsUpdate   = true;
-        this._abRotation.needsUpdate = true;
-        this._abScale.needsUpdate    = true;
-        this._abColor.needsUpdate    = true;
+    private _uploadOrderIndirect(order: Uint32Array, start: number, count: number): void {
+        if (!this._abOrder) return;
+        const ao = this._abOrder.array as Float32Array;
+        for (let j = 0; j < count; j++) ao[j] = order[start + j];
+        this._abOrder.needsUpdate = true;
+        this._geometry.instanceCount = count;
     }
 
     // -----------------------------------------------------------------------
@@ -513,6 +795,7 @@ export class SplatMesh extends THREE.Object3D {
     override dispose(): void {
         this._worker?.terminate();
         this._worker = null;
+        this._disposeTextures();
         this._geometry.dispose();
         this._material.dispose();
     }

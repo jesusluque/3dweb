@@ -540,11 +540,27 @@ export const SettingsPanelContent: React.FC = () => {
             checked={vs.splatOpt.throttle}
             onChange={() => updateSplatOpt({ throttle: !vs.splatOpt.throttle })}
           />
+          <ToggleRow
+            label="Frustum Cull"
+            checked={vs.splatOpt.frustumCull}
+            onChange={() => updateSplatOpt({ frustumCull: !vs.splatOpt.frustumCull })}
+          />
+          <ToggleRow
+            label="GPU Indirect"
+            checked={vs.splatOpt.gpuIndirect}
+            onChange={() => updateSplatOpt({ gpuIndirect: !vs.splatOpt.gpuIndirect })}
+          />
           <SliderRow
             label="Alpha Threshold"
             value={vs.splatOpt.alphaThreshold}
             min={0} max={0.1} step={0.002}
             onChange={v => updateSplatOpt({ alphaThreshold: v })}
+          />
+          <SliderRow
+            label="LOD Factor"
+            value={vs.splatOpt.lodFactor}
+            min={0.05} max={1.0} step={0.05}
+            onChange={v => updateSplatOpt({ lodFactor: v })}
           />
 
           {/* Sub-header: planned */}
@@ -556,9 +572,7 @@ export const SettingsPanelContent: React.FC = () => {
           }}>Planned — splatter.app style</div>
 
           {([
-            ['Frustum Culling', 'frustumCull', 'Per-splat view frustum cull'],
-            ['GPU Radix Sort',  'gpuSort',     'GPU-side O(n) sort via transform feedback'],
-            ['Streaming LOD',   'streamingLOD','Tile-based octree streaming (100M+ splats)'],
+            ['Streaming LOD', 'streamingLOD', 'Tile-based octree streaming (100M+ splats)'],
           ] as [string, keyof SplatOptSettings, string][]).map(([label, key, hint]) => (
             <div key={key} style={{
               display: 'grid', gridTemplateColumns: '42% 1fr',
