@@ -4,6 +4,7 @@ import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu';
 // @ts-ignore
 import { texture as tslTexture, vec4, float } from 'three/tsl';
 import * as SPLAT from 'gsplat';
+import { SplatMesh } from './SplatMesh';
 import { EngineCore } from '../EngineCore';
 import { CameraNode } from '../dag/CameraNode';
 import { DAGNode } from '../dag/DAGNode';
@@ -97,13 +98,9 @@ export class ViewportManager {
    *  element changes size (after flexlayout reflow), not on window.resize. */
   private _resizeObserver: ResizeObserver | null = null;
 
-  // ── gsplat.js overlay (Gaussian Splatting) ─────────────────────────────────
-  private _splatScene:    SPLAT.Scene | null       = null;
-  private _splatRenderer: SPLAT.WebGLRenderer | null = null;
-  private _splatCamera:   SPLAT.Camera | null      = null;
-  private _splatCanvas:   HTMLCanvasElement | null = null;
-  /** Maps SplatNode UUID → the live SPLAT.Splat object currently in _splatScene. */
-  private _splatNodeMap:  Map<string, SPLAT.Splat> = new Map();
+  // ── Native Gaussian Splatting (SplatMesh – shares three.js depth buffer) ────
+  /** Maps SplatNode UUID → the SplatMesh currently in the three.js scene. */
+  private _splatMeshMap: Map<string, SplatMesh> = new Map();
 
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
@@ -194,25 +191,6 @@ export class ViewportManager {
     this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.container.appendChild(this.renderer.domElement);
-
-    // ── gsplat.js overlay canvas (Gaussian Splatting) ──────────────────────
-    // gsplat uses its own WebGL2 context — overlay it transparently on top of
-    // the three.js canvas. pointer-events:none lets clicks through to three.js.
-    this._splatScene    = new SPLAT.Scene();
-    this._splatCamera   = new SPLAT.Camera();
-    this._splatRenderer = new SPLAT.WebGLRenderer();
-    this._splatCanvas   = this._splatRenderer.canvas;
-    Object.assign(this._splatCanvas.style, {
-      position:      'absolute',
-      top:           '0',
-      left:          '0',
-      width:         '100%',
-      height:        '100%',
-      background:    'transparent',
-      pointerEvents: 'none',
-    });
-    this.container.appendChild(this._splatCanvas);
-    this._splatRenderer.setSize(this.container.clientWidth, this.container.clientHeight);
 
     // Grid
     this.gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x333333);
@@ -640,7 +618,6 @@ export class ViewportManager {
     const width  = this.container.clientWidth;
     const height = this.container.clientHeight;
     this.renderer.setSize(width, height);
-    if (this._splatRenderer) this._splatRenderer.setSize(width, height);
     // Camera aspect is always the RENDER resolution ratio, not the panel ratio.
     this.camera.aspect = this.renderResolution.w / this.renderResolution.h;
     this.camera.updateProjectionMatrix();
@@ -809,24 +786,21 @@ export class ViewportManager {
       }
 
     } else if (node instanceof SplatNode) {
-      // ── Gaussian Splat ────────────────────────────────────────────────────
-      // An empty Three.js group provides gizmo attachment and TRS tracking;
-      // actual rendering is done by the gsplat overlay renderer.
+      // ── Gaussian Splat (native three.js renderer — shares depth buffer) ──
       obj = new THREE.Group();
 
-      const loadFromBase64 = (fileData: string, fileFormat: 'splat' | 'ply') => {
+      const loadSplat = (fileData: string, fileFormat: 'splat' | 'ply') => {
         try {
           const binary = Uint8Array.from(atob(fileData), c => c.charCodeAt(0));
-          // Load into a temporary scene so the Splat object is not yet in
-          // _splatScene — the block below handles scene registration uniformly.
           const tmpScene = new SPLAT.Scene();
           const splatObj: SPLAT.Splat = fileFormat === 'ply'
             ? SPLAT.PLYLoader.LoadFromArrayBuffer(binary.buffer, tmpScene)
             : SPLAT.Loader.LoadFromArrayBuffer(binary.buffer, tmpScene);
-          node._splatObject = splatObj;
-          this._splatScene!.addObject(splatObj);
-          this._splatNodeMap.set(node.uuid, splatObj);
-          this._updateSplatTRS(node);
+          const mesh = new SplatMesh();
+          mesh.updateFromData(splatObj.data);
+          node._splatObject = mesh;
+          obj.add(mesh);
+          this._splatMeshMap.set(node.uuid, mesh);
         } catch (e) {
           this.core.logger.log(
             `Splat load failed for "${node.name}": ${(e as any)?.message ?? e}`,
@@ -836,12 +810,12 @@ export class ViewportManager {
       };
 
       if (node._splatObject) {
-        // Already loaded (e.g. direct import or redo) – re-register in scene.
-        this._splatScene!.addObject(node._splatObject as SPLAT.Splat);
-        this._splatNodeMap.set(node.uuid, node._splatObject as SPLAT.Splat);
-        this._updateSplatTRS(node);
+        // Already has a SplatMesh (e.g. redo) — re-attach to scene.
+        const mesh = node._splatObject as SplatMesh;
+        obj.add(mesh);
+        this._splatMeshMap.set(node.uuid, mesh);
       } else if (node.fileData) {
-        loadFromBase64(node.fileData, node.fileFormat);
+        loadSplat(node.fileData, node.fileFormat);
       }
 
     } else {
@@ -870,15 +844,8 @@ export class ViewportManager {
     node.rotate.onDirty = () => this.updateNodeTRS(node, obj);
     node.scale.onDirty = () => this.updateNodeTRS(node, obj);
 
-    // SplatNode: also propagate TRS changes to the gsplat overlay object
-    if (node instanceof SplatNode) {
-      const prevT = node.translate.onDirty;
-      const prevR = node.rotate.onDirty;
-      const prevS = node.scale.onDirty;
-      node.translate.onDirty = () => { prevT?.(); this._updateSplatTRS(node as SplatNode); };
-      node.rotate.onDirty    = () => { prevR?.(); this._updateSplatTRS(node as SplatNode); };
-      node.scale.onDirty     = () => { prevS?.(); this._updateSplatTRS(node as SplatNode); };
-    }
+    // SplatNode TRS is inherited automatically by the SplatMesh child via the
+    // three.js scene graph — no extra dirty callbacks needed here.
 
     // Wire visibility plug → Three.js visible flag
     obj.visible = node.visibility.getValue();
@@ -960,9 +927,9 @@ export class ViewportManager {
       if (ch.helper.visible) ch.helper.update();
     }
 
+    // ── Per-frame splat sort + uniform update (before draw) ────────────────
+    this._updateSplats();
     this._renderMain();
-    // ── gsplat overlay render ─────────────────────────────────────────────
-    this._renderSplats();
     // Notify frame listeners (CameraViewPanel etc.)
     if (this.frameListeners.size > 0) {
       const src = this.renderer.domElement as HTMLCanvasElement;
@@ -1235,83 +1202,23 @@ export class ViewportManager {
     // _stereo is lightweight — keep for reuse
   }
 
-  // ── gsplat helpers ──────────────────────────────────────────────────────────
+  // ── Native Gaussian Splatting helpers ──────────────────────────────────────
 
   /**
-   * Render all Gaussian Splats to the overlay canvas, with the camera
-   * synchronised to the current three.js render camera every frame.
+   * Sort all SplatMesh instances front-to-back and update their per-frame
+   * uniforms (camera matrices, focal length, viewport size).
+   * Called once per frame BEFORE the main three.js render pass so that
+   * depth compositing with geometry works correctly.
    */
-  private _renderSplats(): void {
-    if (!this._splatRenderer || !this._splatScene || !this._splatCamera) return;
-    if (this._splatNodeMap.size === 0) return;
-
-    const canvas = this._splatCanvas!;
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
+  private _updateSplats(): void {
+    if (this._splatMeshMap.size === 0) return;
+    const w = this.renderer.domElement.clientWidth;
+    const h = this.renderer.domElement.clientHeight;
     if (w <= 0 || h <= 0) return;
-
-    // ── Intrinsics ──────────────────────────────────────────────────────────
-    // gsplat uses fy (pixels per radian) — derive from three.js vertical FOV.
-    const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
-    const fy     = (h / 2) / Math.tan(fovRad / 2);
-    const data   = this._splatCamera.data;
-    data.fx   = fy;
-    data.fy   = fy;
-    data.near = this.camera.near;
-    data.far  = this.camera.far;
-    data.setSize(w, h);
-
-    // ── Extrinsics ──────────────────────────────────────────────────────────
-    // gsplat cameras look toward local +Z; three.js cameras look toward local -Z.
-    // Its projection matrix also has –fy (Y-flipped) relative to OpenGL.
-    // Applying Q_gsplat = Q_three × RotX(180°) simultaneously:
-    //   • flips forward: local +Z → same world direction as three.js local –Z
-    //   • flips up:     local –Y → same world-up as three.js, cancelling –fy
-    // This makes the gsplat overlay pixel-accurate on top of the three.js canvas.
-    //
-    // IMPORTANT: set via Camera OBJECT setters, NOT data.update() directly —
-    // _splatRenderer.render() calls camera.update() → data.update(position, rotation)
-    // internally, which would silently overwrite any direct data.update() call.
-    const p  = this.camera.position;
-    const q  = this.camera.quaternion;
-    // RotX(180°) as unit quaternion: (x=1, y=0, z=0, w=0)
-    const rx = new THREE.Quaternion(1, 0, 0, 0); // already normalised
-    const qg = q.clone().multiply(rx);            // Q_gsplat = Q_three * RotX180
-
-    this._splatCamera.position = new SPLAT.Vector3(p.x, p.y, p.z);
-    this._splatCamera.rotation = new SPLAT.Quaternion(qg.x, qg.y, qg.z, qg.w);
-
-    this._splatRenderer.render(this._splatScene, this._splatCamera);
-  }
-
-  /**
-   * Push the current DAG node TRS values into the corresponding gsplat Splat
-   * transform, converting Euler-degrees to Quaternion as required.
-   */
-  private _updateSplatTRS(node: SplatNode): void {
-    const splatObj = this._splatNodeMap.get(node.uuid);
-    if (!splatObj) return;
-
-    const t = node.translate.getValue();
-    const r = node.rotate.getValue();
-    const s = node.scale.getValue();
-
-    // Position
-    splatObj.position = new SPLAT.Vector3(t.x, t.y, t.z);
-
-    // Rotation – convert Euler degrees → THREE Quaternion → SPLAT Quaternion
-    const euler  = new THREE.Euler(
-      THREE.MathUtils.degToRad(r.x),
-      THREE.MathUtils.degToRad(r.y),
-      THREE.MathUtils.degToRad(r.z),
-    );
-    const q = new THREE.Quaternion().setFromEuler(euler);
-    splatObj.rotation = new SPLAT.Quaternion(q.x, q.y, q.z, q.w);
-
-    // Scale
-    splatObj.scale = new SPLAT.Vector3(s.x, s.y, s.z);
-
-    splatObj.update();
+    for (const mesh of this._splatMeshMap.values()) {
+      mesh.sort(this.camera);
+      mesh.updateUniforms(this.camera, w, h);
+    }
   }
 
   // ── Public control API ─────────────────────────────────────────────────────
@@ -1400,11 +1307,11 @@ export class ViewportManager {
       if (idx !== -1) this.lights.splice(idx, 1);
       this.lightHelperMap.delete(uuid);
     }
-    // Clean up gsplat Splat object
-    const splatObj = this._splatNodeMap.get(uuid);
-    if (splatObj && this._splatScene) {
-      this._splatScene.removeObject(splatObj);
-      this._splatNodeMap.delete(uuid);
+    // Clean up native SplatMesh
+    const splatMesh = this._splatMeshMap.get(uuid);
+    if (splatMesh) {
+      splatMesh.dispose();
+      this._splatMeshMap.delete(uuid);
     }
   }
 
@@ -1581,10 +1488,8 @@ export class ViewportManager {
       sn.fileName.setValue(src.fileName.getValue());
       sn.fileData   = src.fileData;
       sn.fileFormat = src.fileFormat;
-      // Clone the gsplat Splat object so the duplicate renders independently
-      if (src._splatObject) {
-        sn._splatObject = (src._splatObject as SPLAT.Splat).clone();
-      }
+      // _splatObject is left null — addNodeToView will recreate a SplatMesh
+      // from fileData when the clone is registered in the scene graph.
       sn.translate.setValue({ ...src.translate.getValue() });
       sn.rotate.setValue({ ...src.rotate.getValue() });
       sn.scale.setValue({ ...src.scale.getValue() });
@@ -1850,7 +1755,12 @@ export class ViewportManager {
     const node = new SplatNode(name);
     node.fileName.setValue(file.name);
     node.fileFormat  = ext;
-    node._splatObject = splatObj;
+
+    // Pre-build SplatMesh from the already-decoded data (avoids a second decode
+    // from base64 when addNodeToView is called immediately after).
+    const mesh = new SplatMesh();
+    mesh.updateFromData(splatObj.data);
+    node._splatObject = mesh;
 
     // Embed raw bytes as base64 for scene serialisation
     const bytes = new Uint8Array(buffer);
@@ -2065,17 +1975,10 @@ export class ViewportManager {
     this.container.removeChild(this.renderer.domElement);
     this.renderer.dispose();
 
-    // ── Dispose gsplat renderer and overlay canvas ──────────────────────────
-    this._splatNodeMap.clear();
-    if (this._splatRenderer) {
-      this._splatRenderer.dispose();
-      this._splatRenderer = null;
+    // ── Dispose native SplatMesh objects ────────────────────────────────────
+    for (const mesh of this._splatMeshMap.values()) {
+      mesh.dispose();
     }
-    if (this._splatCanvas?.parentNode) {
-      this._splatCanvas.parentNode.removeChild(this._splatCanvas);
-    }
-    this._splatCanvas   = null;
-    this._splatScene    = null;
-    this._splatCamera   = null;
+    this._splatMeshMap.clear();
   }
 }
