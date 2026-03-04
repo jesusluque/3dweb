@@ -139,6 +139,14 @@ export class Serializer {
         if (s.attributes.fileName != null)         sn.fileName.setValue(s.attributes.fileName);
         if ((s.attributes as any).__fileData)      sn.fileData   = (s.attributes as any).__fileData;
         if ((s.attributes as any).__fileFormat)    sn.fileFormat = (s.attributes as any).__fileFormat;
+        // Restore crop plugs
+        if (s.attributes.cropEnabled !== undefined) sn.cropEnabled.setValue(s.attributes.cropEnabled);
+        if (s.attributes.cropMinX    !== undefined) sn.cropMinX.setValue(s.attributes.cropMinX);
+        if (s.attributes.cropMinY    !== undefined) sn.cropMinY.setValue(s.attributes.cropMinY);
+        if (s.attributes.cropMinZ    !== undefined) sn.cropMinZ.setValue(s.attributes.cropMinZ);
+        if (s.attributes.cropMaxX    !== undefined) sn.cropMaxX.setValue(s.attributes.cropMaxX);
+        if (s.attributes.cropMaxY    !== undefined) sn.cropMaxY.setValue(s.attributes.cropMaxY);
+        if (s.attributes.cropMaxZ    !== undefined) sn.cropMaxZ.setValue(s.attributes.cropMaxZ);
         node = sn;
       } else {
         // GroupNode or unknown → GroupNode

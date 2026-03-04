@@ -1329,12 +1329,19 @@ export class ViewportManager {
         }
         this.renderer.autoClear = true;
 
-        // Render each eye into its own RT (no scissor needed — camera aspect is locked)
+        // Render each eye into its own RT (no scissor needed — camera aspect is locked).
+        // GS uses custom shader uniforms (viewMatrix, projectionMatrix, uFocal) that must
+        // be refreshed for each stereo eye — they are NOT updated automatically by Three.js.
+        this._refreshSplatUniforms(this._stereo.cameraL);
         this.renderer.setRenderTarget(this._leftRT);
         this.renderer.render(this.scene, this._stereo.cameraL);
 
+        this._refreshSplatUniforms(this._stereo.cameraR);
         this.renderer.setRenderTarget(this._rightRT);
         this.renderer.render(this.scene, this._stereo.cameraR);
+
+        // Restore uniforms to the main camera so the next normal frame is correct.
+        this._refreshSplatUniforms(this.camera);
 
         // Restore colour space before the composite pass so sRGB is applied once
         if (prevColorSpace !== null) {
@@ -1485,6 +1492,16 @@ export class ViewportManager {
     for (const mesh of this._splatMeshMap.values()) {
       mesh.sort(this.camera);
       mesh.updateUniforms(this.camera, w, h);
+    }
+  }
+
+  /** Update GS shader uniforms for a specific camera (used per-eye in anaglyph mode). */
+  private _refreshSplatUniforms(camera: THREE.PerspectiveCamera): void {
+    if (this._splatMeshMap.size === 0) return;
+    const w = this.renderer.domElement.clientWidth;
+    const h = this.renderer.domElement.clientHeight;
+    for (const mesh of this._splatMeshMap.values()) {
+      mesh.updateUniforms(camera, w, h);
     }
   }
 
