@@ -2170,7 +2170,10 @@ export class ViewportManager {
     const node = new LightNode(name);
     node.lightType.setValue(type);
     if (type === 'directional') {
+      // Position at (5,10,7) and rotate so local -Z aims at grid centre (0,0,0)
+      // rx = arcsin(-10/‖d‖) ≈ -49°,  ry = arccos(7/‖d‖ / cos(rx)) ≈ 35°
       node.translate.setValue({ x: 5, y: 10, z: 7 });
+      node.rotate.setValue({ x: -49, y: 35, z: 0 });
     } else if (type === 'point') {
       node.translate.setValue({ x: 0, y: 3, z: 0 });
     } else if (type === 'spot') {
@@ -2312,6 +2315,8 @@ export class ViewportManager {
     dir.color.setValue('#ffffff');
     dir.intensity.setValue(1.0);
     dir.translate.setValue({ x: 5, y: 10, z: 7 });
+    // Rotate so local -Z aims at grid centre (0,0,0) — rx≈-49°, ry≈35°
+    dir.rotate.setValue({ x: -49, y: 35, z: 0 });
     this.core.sceneGraph.addNode(dir);
     this.addNodeToView(dir);
 
