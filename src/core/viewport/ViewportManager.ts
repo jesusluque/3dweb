@@ -2026,6 +2026,8 @@ export class ViewportManager {
     const node = new SplatNode(name);
     node.fileName.setValue(file.name);
     node.fileFormat  = ext;
+    // GSplat convention: Y-up world but data is stored Y-down → flip 180° on X
+    node.rotate.setValue({ x: 180, y: 0, z: 0 });
 
     // Pre-build SplatMesh from the already-decoded data (avoids a second decode
     // from base64 when addNodeToView is called immediately after).
