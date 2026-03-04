@@ -565,7 +565,17 @@ export class SplatMesh extends THREE.Object3D {
             depthWrite:  false,
             transparent: true,
             side: THREE.DoubleSide,
-            blending: THREE.NormalBlending,
+            // CustomBlending enforces SrcAlpha / ONE_MINUS_SRC_ALPHA regardless
+            // of the renderer's premultipliedAlpha:true default. NormalBlending
+            // with premultipliedAlpha uses ONE as the src factor, which adds the
+            // full rgb at any alpha level and creates a halo on low-alpha edges.
+            blending:           THREE.CustomBlending,
+            blendEquation:      THREE.AddEquation,
+            blendSrc:           THREE.SrcAlphaFactor,
+            blendDst:           THREE.OneMinusSrcAlphaFactor,
+            blendEquationAlpha: THREE.AddEquation,
+            blendSrcAlpha:      THREE.OneFactor,
+            blendDstAlpha:      THREE.OneMinusSrcAlphaFactor,
             glslVersion: THREE.GLSL3,
         });
     }
@@ -1020,10 +1030,18 @@ export class SplatMesh extends THREE.Object3D {
     ): void {
         const fovRad = THREE.MathUtils.degToRad(camera.fov);
         const fy = (height / 2) / Math.tan(fovRad / 2);
-        const fx = fy * camera.aspect;
+        // For a standard perspective camera with square pixels:
+        //   fx_correct = (width/2) / tan(hFOV/2)
+        //              = (height*aspect/2) / (tan(vFOV/2)*aspect)
+        //              = (height/2) / tan(vFOV/2)
+        //              = fy
+        // Using fx = fy*aspect is wrong: it inflates the X semi-axis by `aspect`
+        // in Jacobian pixel-space. The NDC conversion (*2/uViewport.x) only
+        // partially cancels this, leaving splats stretched by `aspect` on screen.
+        const fx = fy;
 
         // Store for screen-space LOD in _applyOrder
-        this._currentFocal = (fx + fy) * 0.5;
+        this._currentFocal = fy;
 
         const u = this._material.uniforms;
         u.modelMatrix.value.copy(this.matrixWorld);

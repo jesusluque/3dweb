@@ -597,6 +597,22 @@ export class ViewportManager {
     for (const [, entry] of this.lightHelperMap) {
       if (entry.helper) entry.helper.visible = v;
     }
+
+    // Crop gizmo + crop box helpers
+    if (!v && this._cropGizmoActive) {
+      this._deactivateCropGizmo();
+    }
+    this._syncCropHelpers();
+  }
+
+  /** Sync crop Box3Helper visibility: only shown when cropEnabled + selected + editors visible. */
+  private _syncCropHelpers(): void {
+    const selSet = new Set(this.core.selectionManager.getSelection().map(n => n.uuid));
+    for (const [uuid, helper] of this._splatCropHelperMap) {
+      const node = this.core.sceneGraph.getNodeById(uuid);
+      if (!(node instanceof SplatNode)) continue;
+      helper.visible = node.cropEnabled.getValue() && selSet.has(uuid) && this._editorsVisible;
+    }
   }
 
   /** Whether editor gizmos/helpers are currently shown. */
@@ -630,6 +646,8 @@ export class ViewportManager {
       this.transformControls.enabled = false;
     }
     this.updateOutlines();
+    // Show crop box only for selected SplatNodes
+    this._syncCropHelpers();
   }
 
   // ── Crop Gizmo public API ────────────────────────────────────────────────
@@ -794,8 +812,6 @@ export class ViewportManager {
   /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
   public setAnaglyphEnabled(enabled: boolean, ipd: number): void {
     this._anaglyphEnabled = enabled;
-    // Tell all GS meshes to pre-decode sRGB → linear so the composite's
-    // sRGB re-encode produces the same canvas values as normal rendering.
     for (const mesh of this._splatMeshMap.values()) mesh.setLinearOutput(enabled);
     if (enabled) {
       // Initialise the StereoCamera here so IPD is ready, but defer actual
@@ -826,8 +842,6 @@ export class ViewportManager {
     this.camera.updateProjectionMatrix();
     // RTs must match the new gate size so the compositor has no distortion.
     if (this._anaglyphEnabled && this._stereo) {
-      // Defer the RT rebuild to the start of the next render tick so
-      // we never mutate WebGPU resources mid-frame (causes "already initialized").
       this._anaglyphRTDirty = true;
     }
   };
@@ -1062,7 +1076,8 @@ export class ViewportManager {
         }
         const helper = this._splatCropHelperMap.get(node.uuid);
         if (helper) {
-          helper.visible = enabled;
+          const selected = this.core.selectionManager.getSelection().some(n => n.uuid === node.uuid);
+          helper.visible = enabled && selected && this._editorsVisible;
           helper.box.set(cMin, cMax);
         }
       };
@@ -1073,7 +1088,7 @@ export class ViewportManager {
         new THREE.Vector3(node.cropMaxX.getValue(), node.cropMaxY.getValue(), node.cropMaxZ.getValue()),
       );
       const cropHelper = new THREE.Box3Helper(cropBox, new THREE.Color(0xffaa00));
-      cropHelper.visible = node.cropEnabled.getValue();
+      cropHelper.visible = false; // shown only when selected + cropEnabled
       obj.add(cropHelper);
       this._splatCropHelperMap.set(node.uuid, cropHelper);
 
@@ -1395,8 +1410,13 @@ export class ViewportManager {
     this._rightRT?.dispose();
     (this._compMat as THREE.Material | null)?.dispose();
 
-    this._leftRT  = new THREE.WebGLRenderTarget(w, h);
-    this._rightRT = new THREE.WebGLRenderTarget(w, h);
+    // HalfFloatType preserves linear values from the eye renders without 8-bit
+    // quantization. UnsignedByteType (default) loses precision on dark linear
+    // values: e.g. sRGB 0.1 → linear 0.010 → stored as 3/255 → re-encodes to
+    // 0.110, brightening dark areas in anaglyph vs normal mode.
+    const rtOpts = { type: THREE.HalfFloatType };
+    this._leftRT  = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    this._rightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
 
     if (this._rendererType === 'webgl') {
       // Eye RTs hold linear values (rendered with LinearSRGBColorSpace).
@@ -1491,8 +1511,13 @@ export class ViewportManager {
    */
   private _updateSplats(): void {
     if (this._splatMeshMap.size === 0) return;
-    const w = this.renderer.domElement.clientWidth;
-    const h = this.renderer.domElement.clientHeight;
+    // Use gate dimensions, not canvas clientWidth/clientHeight.
+    // The gate.w/gate.h ratio always equals camera.aspect (renderResolution ratio),
+    // which is required by the GS vertex shader: uViewport.x/uViewport.y must
+    // equal camera.aspect for splats to project as circles instead of ovals.
+    const gate = this._gateViewport();
+    const w = gate.w;
+    const h = gate.h;
     if (w <= 0 || h <= 0) return;
     for (const mesh of this._splatMeshMap.values()) {
       mesh.sort(this.camera);
@@ -1503,10 +1528,10 @@ export class ViewportManager {
   /** Update GS shader uniforms for a specific camera (used per-eye in anaglyph mode). */
   private _refreshSplatUniforms(camera: THREE.PerspectiveCamera): void {
     if (this._splatMeshMap.size === 0) return;
-    const w = this.renderer.domElement.clientWidth;
-    const h = this.renderer.domElement.clientHeight;
+    // Gate dimensions ensure uViewport.x/uViewport.y = camera.aspect → round splats.
+    const gate = this._gateViewport();
     for (const mesh of this._splatMeshMap.values()) {
-      mesh.updateUniforms(camera, w, h);
+      mesh.updateUniforms(camera, gate.w, gate.h);
     }
   }
 
