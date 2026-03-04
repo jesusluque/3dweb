@@ -560,6 +560,10 @@ export class ViewportManager {
   toggleEditorGizmos(): void {
     this._editorsVisible = !this._editorsVisible;
     const v = this._editorsVisible;
+    this.core.logger.log(
+      v ? 'Gizmos visible' : 'Gizmos hidden — press G to restore',
+      v ? 'info' : 'warn',
+    );
 
     // Transform-controls handle
     if (this.transformControls) {
@@ -662,6 +666,7 @@ export class ViewportManager {
     // Hide transform controls while crop mode is active
     this.transformControls.detach();
 
+    this.core.logger.log(`Crop volume active on "${node.name}" — Esc to exit`, 'warn');
     this.onCropModeChanged?.(true);
   }
 
@@ -684,6 +689,7 @@ export class ViewportManager {
       this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
     }
 
+    this.core.logger.log('Crop volume mode exited', 'info');
     this.onCropModeChanged?.(false);
   }
 
