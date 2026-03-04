@@ -887,14 +887,15 @@ export class ViewportManager {
 
       const bodyGeo  = new THREE.BoxGeometry(0.42, 0.26, 0.30);
       const bodyMesh = new THREE.Mesh(bodyGeo, new THREE.MeshBasicMaterial({ visible: false }));
+      bodyMesh.position.z = 0.22;   // shift body back so lens centre sits at camera origin
       const bodyEdge = new THREE.LineSegments(new THREE.EdgesGeometry(bodyGeo), edgeMat);
+      bodyEdge.position.z = 0.22;
 
       const lensGeo  = new THREE.CylinderGeometry(0.06, 0.09, 0.16, 8);
       lensGeo.rotateX(Math.PI / 2);
       const lensMesh = new THREE.Mesh(lensGeo, new THREE.MeshBasicMaterial({ visible: false }));
-      lensMesh.position.z = -0.22;
+      // lens centre now at z=0 — the camera's optical axis origin
       const lensEdge = new THREE.LineSegments(new THREE.EdgesGeometry(lensGeo), edgeMat);
-      lensEdge.position.z = -0.22;
 
       obj = new THREE.Group();
       // helperCam lives INSIDE the group so it inherits the group’s world matrix
