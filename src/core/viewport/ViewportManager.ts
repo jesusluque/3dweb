@@ -794,6 +794,9 @@ export class ViewportManager {
   /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
   public setAnaglyphEnabled(enabled: boolean, ipd: number): void {
     this._anaglyphEnabled = enabled;
+    // Tell all GS meshes to pre-decode sRGB → linear so the composite's
+    // sRGB re-encode produces the same canvas values as normal rendering.
+    for (const mesh of this._splatMeshMap.values()) mesh.setLinearOutput(enabled);
     if (enabled) {
       // Initialise the StereoCamera here so IPD is ready, but defer actual
       // RT/compositor creation to the start of the next renderLoop tick.
@@ -1021,6 +1024,7 @@ export class ViewportManager {
           const mesh = new SplatMesh();
           mesh.updateFromData(splatObj.data);
           mesh.setOptions(this._splatOpts);
+          if (this._anaglyphEnabled) mesh.setLinearOutput(true);
           node._splatObject = mesh;
           obj.add(mesh);
           this._splatMeshMap.set(node.uuid, mesh);
@@ -1318,20 +1322,23 @@ export class ViewportManager {
       } else {
         this._stereo.update(this.camera);
 
-        const prevAutoClear   = this.renderer.autoClear;
-        // Save and restore output colour space so the eye renders are stored as
-        // LINEAR in the RTs.  Without this the renderer gamma-encodes into the RT
-        // and then gamma-encodes again when compositing → colours appear too dark.
-        // Applied to both WebGL and WebGPU renderers — both expose outputColorSpace.
+        const prevAutoClear  = this.renderer.autoClear;
         const prevColorSpace = this.renderer.outputColorSpace ?? null;
+
+        // Eye renders: use LinearSRGBColorSpace so materials write linear values
+        // into the RTs (no sRGB encoding). The composite's colorspace_fragment
+        // then applies a single sRGB encode → correct brightness for all geometry,
+        // background, and grid. GS pre-decodes its sRGB file colours to linear
+        // (via uLinearOutput uniform) so the composite re-encodes them back to
+        // the original values — identical brightness to normal rendering.
         if (prevColorSpace !== null) {
           this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
         }
         this.renderer.autoClear = true;
 
-        // Render each eye into its own RT (no scissor needed — camera aspect is locked).
-        // GS uses custom shader uniforms (viewMatrix, projectionMatrix, uFocal) that must
-        // be refreshed for each stereo eye — they are NOT updated automatically by Three.js.
+        // Render each eye into its own RT.
+        // GS uses custom shader uniforms (viewMatrix, projectionMatrix, uFocal)
+        // that must be refreshed per eye — not auto-updated by Three.js.
         this._refreshSplatUniforms(this._stereo.cameraL);
         this.renderer.setRenderTarget(this._leftRT);
         this.renderer.render(this.scene, this._stereo.cameraL);
@@ -1340,15 +1347,13 @@ export class ViewportManager {
         this.renderer.setRenderTarget(this._rightRT);
         this.renderer.render(this.scene, this._stereo.cameraR);
 
-        // Restore uniforms to the main camera so the next normal frame is correct.
+        // Restore uniforms and color space before the composite pass.
         this._refreshSplatUniforms(this.camera);
-
-        // Restore colour space before the composite pass so sRGB is applied once
         if (prevColorSpace !== null) {
           this.renderer.outputColorSpace = prevColorSpace;
         }
 
-        // Back to screen — clear canvas then composite quad into gate area
+        // Back to screen — clear canvas then composite quad into gate area.
         this.renderer.setRenderTarget(null);
         this.renderer.autoClear = false;
         this.renderer.clear(true, true, true);   // clears full canvas (bars → bg colour)
@@ -1394,8 +1399,11 @@ export class ViewportManager {
     this._rightRT = new THREE.WebGLRenderTarget(w, h);
 
     if (this._rendererType === 'webgl') {
-      // Classic WebGL: use a ShaderMaterial with the same simple channel split
-      // (left.r, right.g, right.b) so the output is identical to the WebGPU path.
+      // Eye RTs hold linear values (rendered with LinearSRGBColorSpace).
+      // The composite applies #include <colorspace_fragment> which encodes the
+      // linear values to sRGB exactly once — identical to a normal single render.
+      // GS pre-decodes its sRGB file colours via uLinearOutput so the final
+      // encoded result matches normal mode.
       this._compMat = new THREE.ShaderMaterial({
         uniforms: {
           mapLeft:  { value: this._leftRT.texture  },
@@ -1413,9 +1421,6 @@ export class ViewportManager {
           'uniform sampler2D mapRight;',
           'varying vec2 vUv;',
           'void main() {',
-          // Eye RTs are rendered with LinearSRGBColorSpace so they hold linear values.
-          // Read them directly, do the channel split, then let #include <colorspace_fragment>
-          // apply exactly one sRGB encoding for the screen output.
           '  vec4 l = texture2D(mapLeft,  vUv);',
           '  vec4 r = texture2D(mapRight, vUv);',
           '  gl_FragColor = vec4(l.r, r.g, r.b, 1.0);',

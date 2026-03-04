@@ -368,8 +368,14 @@ in  vec2 vUv;
 in  vec4 vColor;
 
 uniform float uAlphaThreshold;  // 0 = disabled; discard below this
+uniform float uLinearOutput;    // 1 = decode sRGB→linear before output (anaglyph composite mode)
 
 out vec4 fragColor;
+
+// Precise IEC 61966-2-1 sRGB→linear per component
+float sRGBDecode(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
 
 void main() {
     float r2 = dot(vUv, vUv);
@@ -377,7 +383,15 @@ void main() {
 
     float alpha = exp(-r2) * vColor.a;      // Gaussian falloff × splat opacity
     if (uAlphaThreshold > 0.0 && alpha < uAlphaThreshold) discard;
-    fragColor = vec4(vColor.rgb, alpha);          // non-premultiplied
+
+    // In normal rendering GS bypasses Three.js color management (RawShaderMaterial)
+    // and outputs vColor.rgb directly. In anaglyph mode the composite shader applies
+    // sRGB encoding once (linearToOutputTexel). Pre-decoding here cancels that out
+    // so the final canvas value equals the original vColor.rgb.
+    vec3 rgb = uLinearOutput > 0.5
+        ? vec3(sRGBDecode(vColor.r), sRGBDecode(vColor.g), sRGBDecode(vColor.b))
+        : vColor.rgb;
+    fragColor = vec4(rgb, alpha);
 }
 `;
 
@@ -532,6 +546,7 @@ export class SplatMesh extends THREE.Object3D {
             uFocal:            { value: new THREE.Vector2(500, 500) },
             uViewport:         { value: new THREE.Vector2(1, 1) },
             uAlphaThreshold:   { value: this._opts.alphaThreshold },
+            uLinearOutput:     { value: 0.0 },
         };
         if (indirect) {
             Object.assign(baseUniforms, {
@@ -553,6 +568,13 @@ export class SplatMesh extends THREE.Object3D {
             blending: THREE.NormalBlending,
             glslVersion: THREE.GLSL3,
         });
+    }
+
+    /** Switch GS output to linear (sRGB-decoded) for the anaglyph composite pass. */
+    public setLinearOutput(enabled: boolean): void {
+        if (this._material.uniforms.uLinearOutput) {
+            this._material.uniforms.uLinearOutput.value = enabled ? 1.0 : 0.0;
+        }
     }
 
     // -----------------------------------------------------------------------
