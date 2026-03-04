@@ -16,6 +16,8 @@ import { SplatNode } from '../dag/SplatNode';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 
 /** Walk up the parent chain to check if `obj` is a descendant of `ancestor`. */
 function isDescendantOf(obj: THREE.Object3D, ancestor: THREE.Object3D): boolean {
@@ -106,6 +108,22 @@ export class ViewportManager {
 
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
+
+  // ── HDRI environment lighting ─────────────────────────────────────────────
+  /** The PMREM-processed environment map currently applied to the scene. */
+  private _hdriEnvMap: THREE.Texture | null = null;
+  /** Whether the HDRI environment is currently contributing to scene lighting. */
+  private _hdriEnabled = false;
+  /** Intensity multiplier for the HDRI environment light (scene.environmentIntensity). */
+  private _hdriIntensity = 1.0;
+  /** Intensity multiplier for the HDRI background sphere (scene.backgroundIntensity). */
+  private _hdriBackgroundIntensity = 1.0;
+  /** Y-axis rotation of the HDRI environment in degrees. */
+  private _hdriRotation = 0;
+  /** When true the HDRI is also used as the visible scene background. */
+  private _hdriAsBackground = false;
+  /** Original solid-colour background kept so we can restore it when HDRI background is toggled off. */
+  private _savedBgColor: THREE.Color = new THREE.Color(0x202020);
 
   // Per-drag TRS snapshots for ALL selected nodes (multi-select transform support)
   private dragSnapshots: Array<{
@@ -1970,7 +1988,155 @@ export class ViewportManager {
 
   /** Change the scene background colour. */
   public setBackgroundColor(hex: string): void {
-    this.scene.background = new THREE.Color(hex);
+    this._savedBgColor = new THREE.Color(hex);
+    // Only overwrite the visible background if HDRI-as-background is off
+    if (!this._hdriAsBackground || !this._hdriEnabled || !this._hdriEnvMap) {
+      this.scene.background = new THREE.Color(hex);
+    }
+  }
+
+  // ── HDRI helpers ────────────────────────────────────────────────────────────
+
+  /**
+   * Load an HDR or EXR texture from `url` and apply it as the scene environment.
+   * Uses PMREMGenerator so the texture works correctly with PBR materials.
+   * Returns a promise that resolves with the processed texture.
+   */
+  public async loadHdri(url: string, fileExtension: string = 'hdr'): Promise<THREE.Texture> {
+    const generator = new THREE.PMREMGenerator(this.renderer);
+    generator.compileEquirectangularShader();
+
+    let rawTexture: THREE.Texture;
+    if (fileExtension.toLowerCase() === 'exr') {
+      const loader = new EXRLoader();
+      rawTexture = await new Promise<THREE.Texture>((resolve, reject) => {
+        loader.load(url, resolve, undefined, reject);
+      });
+    } else {
+      const loader = new HDRLoader();
+      rawTexture = await new Promise<THREE.Texture>((resolve, reject) => {
+        loader.load(url, resolve, undefined, reject);
+      });
+    }
+
+    const envMap = generator.fromEquirectangular(rawTexture).texture;
+    rawTexture.dispose();
+    generator.dispose();
+
+    // Store and apply
+    if (this._hdriEnvMap) this._hdriEnvMap.dispose();
+    this._hdriEnvMap = envMap;
+
+    this._applyHdriState();
+    return envMap;
+  }
+
+  /**
+   * Open a native file picker for .hdr / .exr files, load the selection,
+   * and apply it as the HDRI environment.  Returns the chosen filename (or null
+   * if the user cancelled).
+   */
+  public async importHdri(): Promise<string | null> {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.hdr,.exr';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) { resolve(null); return; }
+        const ext = file.name.split('.').pop() ?? 'hdr';
+        const url = URL.createObjectURL(file);
+        try {
+          await this.loadHdri(url, ext);
+          this._hdriEnabled = true;
+          this._applyHdriState();
+          resolve(file.name);
+        } catch (err) {
+          console.error('HDRI import failed:', err);
+          resolve(null);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      };
+      input.click();
+    });
+  }
+
+  /** Enable or disable HDRI contribution to lighting (does not unload the texture). */
+  public setHdriEnabled(enabled: boolean): void {
+    this._hdriEnabled = enabled;
+    this._applyHdriState();
+  }
+
+  /** Set the HDRI intensity (scene.environmentIntensity). */
+  public setHdriIntensity(v: number): void {
+    this._hdriIntensity = v;
+    if (this._hdriEnabled && this._hdriEnvMap) {
+      (this.scene as any).environmentIntensity = v;
+    }
+  }
+
+  /** Rotate the HDRI environment around the Y axis (degrees). */
+  public setHdriRotation(deg: number): void {
+    this._hdriRotation = deg;
+    if (this._hdriEnabled && this._hdriEnvMap) {
+      // Use .set() on the existing Euler so Three.js dirty-tracking fires correctly.
+      const rad = THREE.MathUtils.degToRad(deg);
+      (this.scene as any).environmentRotation.set(0, rad, 0);
+      if (this._hdriAsBackground) {
+        (this.scene as any).backgroundRotation.set(0, rad, 0);
+      }
+    }
+  }
+
+  /** Set the background-sphere intensity independently from the lighting intensity. */
+  public setHdriBackgroundIntensity(v: number): void {
+    this._hdriBackgroundIntensity = v;
+    if (this._hdriEnabled && this._hdriEnvMap && this._hdriAsBackground) {
+      (this.scene as any).backgroundIntensity = v;
+    }
+  }
+
+  /** When true the HDRI is shown as the scene background; when false the solid bg colour is restored. */
+  public setHdriAsBackground(v: boolean): void {
+    this._hdriAsBackground = v;
+    this._applyHdriState();
+  }
+
+  /** Unload the current HDRI and restore the solid background colour. */
+  public clearHdri(): void {
+    if (this._hdriEnvMap) {
+      this._hdriEnvMap.dispose();
+      this._hdriEnvMap = null;
+    }
+    this._hdriEnabled = false;
+    this.scene.environment = null;
+    this.scene.background  = this._savedBgColor.clone();
+  }
+
+  /** Internal: push all HDRI state fields to the three.js scene. */
+  private _applyHdriState(): void {
+    const rad = THREE.MathUtils.degToRad(this._hdriRotation);
+    if (!this._hdriEnvMap || !this._hdriEnabled) {
+      this.scene.environment = null;
+      this.scene.background  = this._savedBgColor.clone();
+      (this.scene as any).environmentIntensity = 1.0;
+      (this.scene as any).backgroundIntensity  = 1.0;
+      return;
+    }
+    this.scene.environment = this._hdriEnvMap;
+    (this.scene as any).environmentIntensity = this._hdriIntensity;
+    // .set() mutates the existing Euler so Three.js dirty-tracking fires correctly.
+    (this.scene as any).environmentRotation.set(0, rad, 0);
+
+    if (this._hdriAsBackground) {
+      this.scene.background = this._hdriEnvMap;
+      (this.scene as any).backgroundRotation.set(0, rad, 0);
+      (this.scene as any).backgroundIntensity = this._hdriBackgroundIntensity;
+    } else {
+      this.scene.background = this._savedBgColor.clone();
+      (this.scene as any).backgroundIntensity = 1.0;
+    }
   }
 
   public dispose() {

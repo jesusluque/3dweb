@@ -295,6 +295,7 @@ export const SettingsPanelContent: React.FC = () => {
   const [effectsOpen,   setEffectsOpen]   = useState(true);
   const [anaglyphOpen,  setAnaglyphOpen]  = useState(false);
   const [renderOpen,    setRenderOpen]    = useState(true);
+  const [hdriOpen,      setHdriOpen]      = useState(true);
   const [splatOpen,     setSplatOpen]     = useState(true);
 
   const setShading = (m: ShadingModeType) => {
@@ -363,6 +364,15 @@ export const SettingsPanelContent: React.FC = () => {
     updateVS({ splatOpt: next });
     dispatchViewport.setSplatOpt(next);
   };
+
+  // ── HDRI handlers ────────────────────────────────────────────────────────
+  const toggleHdri    = () => { const n = !vs.hdriEnabled; updateVS({ hdriEnabled: n }); dispatchViewport.setHdriEnabled(n); };
+  const setHdriInt    = (v: number) => { updateVS({ hdriIntensity: v }); dispatchViewport.setHdriIntensity(v); };
+  const setHdriBgInt  = (v: number) => { updateVS({ hdriBgIntensity: v }); dispatchViewport.setHdriBgIntensity(v); };
+  const setHdriRot    = (v: number) => { updateVS({ hdriRotation: v }); dispatchViewport.setHdriRotation(v); };
+  const toggleHdriBg  = () => { const n = !vs.hdriAsBackground; updateVS({ hdriAsBackground: n }); dispatchViewport.setHdriAsBackground(n); };
+  const importHdri    = () => { dispatchViewport.importHdri(); };
+  const clearHdri     = () => { updateVS({ hdriEnabled: false, hdriFileName: '', hdriAsBackground: false }); dispatchViewport.clearHdri(); };
 
   return (
     <div style={{
@@ -506,6 +516,100 @@ export const SettingsPanelContent: React.FC = () => {
       <Sec title="Render" open={renderOpen} onToggle={() => setRenderOpen(v => !v)} />
       {renderOpen && (
         <ResolutionRow value={vs.renderRes} onChange={setRes} />
+      )}
+
+      {/* ── HDRI ENVIRONMENT ─────────────────────────────────────── */}
+      <Sec title="HDRI / IBL" tag="environment" open={hdriOpen} onToggle={() => setHdriOpen(v => !v)} accent />
+      {hdriOpen && (
+        <>
+          {/* Import / clear row */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '42% 1fr',
+            borderBottom: `1px solid ${C.border}`,
+          }}>
+            <div style={{
+              padding: '4px 8px', fontSize: 11, color: C.muted,
+              fontFamily: '"Segoe UI",system-ui,sans-serif',
+              display: 'flex', alignItems: 'center',
+              borderRight: `1px solid ${C.border}`, userSelect: 'none',
+            }}>HDR / EXR File</div>
+            <div style={{ padding: '3px 6px', display: 'flex', gap: 4, alignItems: 'center' }}>
+              <button
+                onClick={importHdri}
+                style={{
+                  flex: 1, padding: '3px 6px', fontSize: 10, borderRadius: 2,
+                  background: 'rgba(74,144,226,0.25)',
+                  border: `1px solid rgba(74,144,226,0.5)`,
+                  color: C.blue, cursor: 'pointer',
+                  fontFamily: '"Segoe UI",system-ui,sans-serif',
+                }}
+              >
+                {vs.hdriFileName ? '↺ Reload' : '↑ Import'}
+              </button>
+              {vs.hdriFileName && (
+                <button
+                  onClick={clearHdri}
+                  title="Clear HDRI"
+                  style={{
+                    padding: '3px 6px', fontSize: 10, borderRadius: 2,
+                    background: 'rgba(255,80,80,0.18)',
+                    border: '1px solid rgba(255,80,80,0.4)',
+                    color: '#ff8080', cursor: 'pointer',
+                  }}
+                >✕</button>
+              )}
+            </div>
+          </div>
+
+          {/* Current file name */}
+          {vs.hdriFileName && (
+            <div style={{
+              padding: '3px 10px', fontSize: 9.5,
+              fontFamily: '"Consolas","Menlo",monospace',
+              color: C.green, letterSpacing: '0.2px',
+              borderBottom: `1px solid ${C.border}`,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {vs.hdriFileName}
+            </div>
+          )}
+
+          <ToggleRow label="Enable HDRI"     checked={vs.hdriEnabled}      onChange={toggleHdri} />
+          <SliderRow
+            label="Light Intensity"
+            value={vs.hdriIntensity}
+            min={0} max={5} step={0.05}
+            onChange={setHdriInt}
+          />
+          <ToggleRow label="Show as BG"      checked={vs.hdriAsBackground}  onChange={toggleHdriBg} />
+          {vs.hdriAsBackground && (
+            <SliderRow
+              label="BG Intensity"
+              value={vs.hdriBgIntensity}
+              min={0} max={5} step={0.05}
+              onChange={setHdriBgInt}
+            />
+          )}
+          <SliderRow
+            label="Rotation (°)"
+            value={vs.hdriRotation}
+            min={-180} max={180} step={1}
+            onChange={setHdriRot}
+          />
+
+          {/* Info note */}
+          <div style={{
+            padding: '4px 10px 5px',
+            fontSize: 9.5,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.dim,
+            borderBottom: `1px solid ${C.border}`,
+            lineHeight: 1.5,
+          }}>
+            Supported: .hdr (Radiance), .exr (OpenEXR).<br />
+            HDRI illuminates all PBR materials via Image-Based Lighting.
+          </div>
+        </>
       )}
 
       {/* ── GAUSSIAN SPLAT ────────────────────────────────────────── */}

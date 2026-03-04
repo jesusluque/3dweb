@@ -63,6 +63,14 @@ export const dispatchViewport = {
   setOutlineColor:    (color: string)                => viewportBus.dispatchEvent(new CustomEvent('setOutlineColor',    { detail: color })),
   setOutlineWidth:    (px: number)                   => viewportBus.dispatchEvent(new CustomEvent('setOutlineWidth',    { detail: px })),
   setSplatOpt:        (s: SplatOptSettings)          => viewportBus.dispatchEvent(new CustomEvent('setSplatOpt',        { detail: s })),
+  // HDRI environment
+  setHdriEnabled:     (v: boolean)                  => viewportBus.dispatchEvent(new CustomEvent('setHdriEnabled',     { detail: v })),
+  setHdriIntensity:   (v: number)                   => viewportBus.dispatchEvent(new CustomEvent('setHdriIntensity',   { detail: v })),
+  setHdriBgIntensity: (v: number)                   => viewportBus.dispatchEvent(new CustomEvent('setHdriBgIntensity', { detail: v })),
+  setHdriRotation:    (deg: number)                 => viewportBus.dispatchEvent(new CustomEvent('setHdriRotation',    { detail: deg })),
+  setHdriAsBackground:(v: boolean)                  => viewportBus.dispatchEvent(new CustomEvent('setHdriAsBackground',{ detail: v })),
+  importHdri:         ()                            => viewportBus.dispatchEvent(new CustomEvent('importHdri')),
+  clearHdri:          ()                            => viewportBus.dispatchEvent(new CustomEvent('clearHdri')),
 };
 
 // ── Scene creation commands ────────────────────────────────────────────────────

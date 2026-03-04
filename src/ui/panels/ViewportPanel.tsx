@@ -231,6 +231,19 @@ export const ViewportPanel: React.FC = () => {
       markSceneDirty();
     };
 
+    // ── HDRI handlers ─────────────────────────────────────────────────────────
+    const onHdriEnabled     = (e: Event) => vm.setHdriEnabled((e as CustomEvent<boolean>).detail);
+    const onHdriIntensity   = (e: Event) => vm.setHdriIntensity((e as CustomEvent<number>).detail);
+    const onHdriBgIntensity = (e: Event) => vm.setHdriBackgroundIntensity((e as CustomEvent<number>).detail);
+    const onHdriRotation    = (e: Event) => vm.setHdriRotation((e as CustomEvent<number>).detail);
+    const onHdriBg          = (e: Event) => vm.setHdriAsBackground((e as CustomEvent<boolean>).detail);
+    const onImportHdri      = () => {
+      vm.importHdri().then(name => {
+        if (name) updateVS({ hdriEnabled: true, hdriFileName: name });
+      });
+    };
+    const onClearHdri       = () => { vm.clearHdri(); updateVS({ hdriEnabled: false, hdriFileName: '' }); };
+
     toolBus    .addEventListener('tool',             onTool);
     viewportBus.addEventListener('setGridVisible',    onGridVisible);
     viewportBus.addEventListener('setShadingMode',    onShading);
@@ -244,6 +257,13 @@ export const ViewportPanel: React.FC = () => {
     viewportBus.addEventListener('setOutlineColor',   (e: Event) => vm.setOutlineColor((e as CustomEvent<string>).detail));
     viewportBus.addEventListener('setOutlineWidth',   (e: Event) => vm.setOutlineWidth((e as CustomEvent<number>).detail));
     viewportBus.addEventListener('setSplatOpt',       (e: Event) => vm.setSplatOpt((e as CustomEvent).detail));
+    viewportBus.addEventListener('setHdriEnabled',    onHdriEnabled);
+    viewportBus.addEventListener('setHdriIntensity',  onHdriIntensity);
+    viewportBus.addEventListener('setHdriBgIntensity',onHdriBgIntensity);
+    viewportBus.addEventListener('setHdriRotation',   onHdriRotation);
+    viewportBus.addEventListener('setHdriAsBackground', onHdriBg);
+    viewportBus.addEventListener('importHdri',        onImportHdri);
+    viewportBus.addEventListener('clearHdri',         onClearHdri);
     sceneBus   .addEventListener('createPrimitive',   onCreate);
     sceneBus   .addEventListener('createCamera',      onCreateCamera);
     sceneBus   .addEventListener('createLight',       onCreateLight);
@@ -268,6 +288,13 @@ export const ViewportPanel: React.FC = () => {
       viewportBus.removeEventListener('setGizmoSize',      onGizmoSize);
       viewportBus.removeEventListener('setBgColor',         onBgColor);
       // outline listeners are anonymous — they auto-clean when vm is disposed
+      viewportBus.removeEventListener('setHdriEnabled',     onHdriEnabled);
+      viewportBus.removeEventListener('setHdriIntensity',   onHdriIntensity);
+      viewportBus.removeEventListener('setHdriBgIntensity', onHdriBgIntensity);
+      viewportBus.removeEventListener('setHdriRotation',    onHdriRotation);
+      viewportBus.removeEventListener('setHdriAsBackground',onHdriBg);
+      viewportBus.removeEventListener('importHdri',         onImportHdri);
+      viewportBus.removeEventListener('clearHdri',          onClearHdri);
       sceneBus   .removeEventListener('createPrimitive',   onCreate);
       sceneBus   .removeEventListener('createCamera',      onCreateCamera);
       sceneBus   .removeEventListener('createLight',       onCreateLight);

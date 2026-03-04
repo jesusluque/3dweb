@@ -44,6 +44,13 @@ export interface ViewportSettings {
   rendererType: 'webgpu' | 'webgl';
   /** Gaussian Splat rendering optimizations. */
   splatOpt: SplatOptSettings;
+  // ── HDRI environment ───────────────────────────────────────────────────────
+  hdriEnabled: boolean;
+  hdriIntensity: number;
+  hdriBgIntensity: number;        // background-sphere intensity (independent from lighting)
+  hdriRotation: number;           // degrees, Y-axis
+  hdriAsBackground: boolean;
+  hdriFileName: string;           // display name of the loaded file (empty = none)
 }
 
 export type { SplatOptSettings };
@@ -66,6 +73,12 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   anaglyphIPD: 0.064,
   rendererType: 'webgl',
   splatOpt: { ...DEFAULT_SPLAT_OPT },
+  hdriEnabled: false,
+  hdriIntensity: 1.0,
+  hdriBgIntensity: 1.0,
+  hdriRotation: 0,
+  hdriAsBackground: false,
+  hdriFileName: '',
 };
 
 interface AppState {
