@@ -342,7 +342,9 @@ export class ViewportManager {
       }
     });
 
-    this.scene.add(this.transformControls.getHelper());
+    const tcHelper = this.transformControls.getHelper();
+    tcHelper.traverse((o) => { o.userData.isEditorGizmo = true; });
+    this.scene.add(tcHelper);
 
     // ⌘G / Ctrl+G must be caught at window level so the browser's
     // "Find Next" shortcut is suppressed before reaching the container.
@@ -897,6 +899,7 @@ export class ViewportManager {
       const bodyGeo  = new THREE.BoxGeometry(0.42, 0.26, 0.30);
       const bodyMesh = new THREE.Mesh(bodyGeo, new THREE.MeshBasicMaterial({ visible: false }));
       bodyMesh.position.z = 0.22;   // shift body back so lens centre sits at camera origin
+      bodyMesh.userData.isEditorGizmo = true;
       const bodyEdge = new THREE.LineSegments(new THREE.EdgesGeometry(bodyGeo), edgeMat);
       bodyEdge.position.z = 0.22;
 
@@ -904,6 +907,7 @@ export class ViewportManager {
       lensGeo.rotateX(Math.PI / 2);
       const lensMesh = new THREE.Mesh(lensGeo, new THREE.MeshBasicMaterial({ visible: false }));
       // lens centre now at z=0 — the camera's optical axis origin
+      lensMesh.userData.isEditorGizmo = true;
       const lensEdge = new THREE.LineSegments(new THREE.EdgesGeometry(lensGeo), edgeMat);
 
       obj = new THREE.Group();
@@ -944,8 +948,10 @@ export class ViewportManager {
         const ambMat = new THREE.MeshBasicMaterial({
           color: colorHex, wireframe: true, transparent: true, opacity: 0.45,
         });
+        const ambMesh = new THREE.Mesh(ambGeo, ambMat);
+        ambMesh.userData.isEditorGizmo = true;
         obj = new THREE.Group();
-        obj.add(light, new THREE.Mesh(ambGeo, ambMat));
+        obj.add(light, ambMesh);
         this.lightHelperMap.set(node.uuid, { light, helper: null });
         this.lights.push(light);
         const refreshAmbient = () => {
@@ -985,6 +991,7 @@ export class ViewportManager {
           new THREE.SphereGeometry(0.08, 8, 6),
           new THREE.MeshBasicMaterial({ color: colorHex }),
         );
+        indicator.userData.isEditorGizmo = true;
 
         obj = new THREE.Group();
         obj.add(light, indicator);

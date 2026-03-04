@@ -43,7 +43,7 @@
 
 import * as THREE  from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import type { MeshSourceRef, CameraFrustum } from './CoverageResults';
+import type { CameraFrustum } from './CoverageResults';
 
 // ── GLSL ──────────────────────────────────────────────────────────────────────
 
@@ -108,19 +108,10 @@ export type { CameraFrustum };
 /** Captured call args so updateDensity() can trigger a full rebuild. */
 interface ApplyArgs {
   cameraCenters: CameraFrustum[];
-  sources:       MeshSourceRef[];
-  nodeMap:       Map<string, THREE.Object3D>;
   scene:         THREE.Scene;
   density:       number;
   pointSizeMult: number;
   opacity:       number;
-}
-
-interface DimmedMesh {
-  mesh:                THREE.Mesh;
-  matIndex:            number;
-  originalOpacity:     number;
-  originalTransparent: boolean;
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -128,7 +119,6 @@ interface DimmedMesh {
 export class HeatmapApplier {
   private _points:   THREE.Points | null = null;
   private _scene:    THREE.Scene  | null = null;
-  private _dimmed:   DimmedMesh[] = [];
   private _active    = false;
   private _lastArgs: ApplyArgs | null = null;
 
@@ -136,14 +126,12 @@ export class HeatmapApplier {
 
   apply(
     cameraCenters: CameraFrustum[],
-    sources:       MeshSourceRef[],
-    nodeMap:       Map<string, THREE.Object3D>,
     scene:         THREE.Scene,
     density       = 4,
     pointSizeMult = 1.0,
     opacity       = 0.9,
   ): void {
-    this._lastArgs = { cameraCenters, sources, nodeMap, scene, density, pointSizeMult, opacity };
+    this._lastArgs = { cameraCenters, scene, density, pointSizeMult, opacity };
     this._rebuild(this._lastArgs);
   }
 
@@ -171,7 +159,7 @@ export class HeatmapApplier {
     this._rebuild(this._lastArgs);
   }
 
-  /** Remove overlay and restore original mesh materials. */
+  /** Remove overlay. */
   clear(): void {
     if (this._points) {
       this._scene?.remove(this._points);
@@ -179,19 +167,6 @@ export class HeatmapApplier {
       (this._points.material as THREE.Material).dispose();
       this._points = null;
     }
-    for (const d of this._dimmed) {
-      const mats = Array.isArray(d.mesh.material)
-        ? d.mesh.material as THREE.Material[]
-        : [d.mesh.material as THREE.Material];
-      const m = d.matIndex >= 0 ? mats[d.matIndex] : mats[0];
-      if (m?.isMaterial) {
-        const sm = m as THREE.MeshStandardMaterial;
-        sm.opacity     = d.originalOpacity;
-        sm.transparent = d.originalTransparent;
-        sm.needsUpdate = true;
-      }
-    }
-    this._dimmed   = [];
     this._scene    = null;
     this._active   = false;
     this._lastArgs = null;
@@ -202,7 +177,7 @@ export class HeatmapApplier {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   private _rebuild(args: ApplyArgs): void {
-    const { cameraCenters, sources, nodeMap, scene, density, pointSizeMult, opacity } = args;
+    const { cameraCenters, scene, density, pointSizeMult, opacity } = args;
 
     // Remove old Points
     if (this._points) {
@@ -211,62 +186,44 @@ export class HeatmapApplier {
       (this._points.material as THREE.Material).dispose();
       this._points = null;
     }
-    if (!this._active) {
-      this._dimmed = [];
-    }
     this._scene  = scene;
     this._active = false;
 
     const nCams = cameraCenters.length;
 
     // ── Phase 1: collect all world-space triangle vertices ────────────────
+    // Walk the entire live scene — this picks up every visible geometry
+    // regardless of DAG node type (GltfNode, MeshNode, SplatNode, etc.).
     // triVerts: flat [ax,ay,az, bx,by,bz, cx,cy,cz, ...] — 9 floats / tri
-    const triVerts: number[] = [];
-    const triAreas: number[] = [];
+    const triVerts:   number[] = [];
+    const triAreas:   number[] = [];
+    const triNormals: number[] = [];   // flat face normals [nx,ny,nz, ...] — 3 floats / tri
     let   totalArea   = 0;
     let   edgeLenSum  = 0;
     let   edgeSamples = 0;
     const MAX_EDGE_SAMPLES = 600;
 
-    const vA = new THREE.Vector3();
-    const vB = new THREE.Vector3();
-    const vC = new THREE.Vector3();
-    const AB = new THREE.Vector3();
-    const AC = new THREE.Vector3();
+    const vA  = new THREE.Vector3();
+    const vB  = new THREE.Vector3();
+    const vC  = new THREE.Vector3();
+    const AB  = new THREE.Vector3();
+    const AC  = new THREE.Vector3();
+    const _N  = new THREE.Vector3();   // scratch for face normal
 
-    const byNode = new Map<string, MeshSourceRef[]>();
-    for (const src of sources) {
-      let arr = byNode.get(src.dagNodeId);
-      if (!arr) { arr = []; byNode.set(src.dagNodeId, arr); }
-      arr.push(src);
-    }
+    scene.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh)) return;
+      if (!obj.visible) return;
+      // Skip tagged editor gizmos (camera body/lens, light indicators, etc.)
+      if (obj.userData.isEditorGizmo) return;
 
-    const isFirstBuild = this._dimmed.length === 0;
+      // Skip wireframe overlays
+      const mat = obj.material;
+      const isWireframe = Array.isArray(mat)
+        ? mat.every((m: THREE.Material) => (m as any).wireframe === true)
+        : (mat as any).wireframe === true;
+      if (isWireframe) return;
 
-    for (const [dagNodeId, nodeSources] of byNode) {
-      const root = nodeMap.get(dagNodeId);
-      if (!root) continue;
-
-      const byName = new Map<string, MeshSourceRef>();
-      for (const s of nodeSources) byName.set(s.meshName, s);
-
-      const unnamedSources = nodeSources.filter(
-        s => s.meshName === '(mesh)' || s.meshName === '(primitive)',
-      );
-      let unnamedIdx = 0;
-
-      root.traverse((obj) => {
-        if (!(obj instanceof THREE.Mesh)) return;
-        if (!obj.visible) return;
-        const mat = obj.material;
-        const isWireframe = Array.isArray(mat)
-          ? mat.every((m: THREE.Material) => (m as any).wireframe === true)
-          : (mat as any).wireframe === true;
-        if (isWireframe) return;
-
-        const src = byName.get(obj.name) ?? unnamedSources[unnamedIdx++];
-        if (!src) return;
-
+      {
         obj.updateWorldMatrix(true, false);
         const world = obj.matrixWorld;
 
@@ -282,13 +239,20 @@ export class HeatmapApplier {
 
           AB.subVectors(vB, vA);
           AC.subVectors(vC, vA);
-          const area = AB.clone().cross(AC).length() * 0.5;
+          const cross = AB.clone().cross(AC);
+          const area  = cross.length() * 0.5;
+
+          // World-space face normal (normalised) — used for back-face cull
+          // and normal-bias self-intersection offset in Phase 4.
+          _N.copy(cross);
+          if (area > 1e-12) _N.normalize(); else _N.set(0, 1, 0);
 
           triVerts.push(
             vA.x, vA.y, vA.z,
             vB.x, vB.y, vB.z,
             vC.x, vC.y, vC.z,
           );
+          triNormals.push(_N.x, _N.y, _N.z);
           triAreas.push(area);
           totalArea += area;
 
@@ -299,26 +263,8 @@ export class HeatmapApplier {
         }
 
         if (geo !== origGeo) geo.dispose();
-
-        // Dim the underlying mesh (first build only)
-        if (isFirstBuild) {
-          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-          mats.forEach((m: THREE.Material, mi: number) => {
-            if (!m.isMaterial) return;
-            const sm = m as THREE.MeshStandardMaterial;
-            this._dimmed.push({
-              mesh:                obj,
-              matIndex:            Array.isArray(obj.material) ? mi : -1,
-              originalOpacity:     sm.opacity     ?? 1,
-              originalTransparent: sm.transparent ?? false,
-            });
-            sm.transparent = true;
-            sm.opacity     = 0.18;
-            sm.needsUpdate = true;
-          });
-        }
-      });
-    }
+      }
+    });
 
     const totalTriCount = triAreas.length;
     if (totalTriCount === 0) return;
@@ -344,7 +290,7 @@ export class HeatmapApplier {
     const positions: number[] = [];
     const colors:    number[] = [];
 
-    const SHADOW_EPS = 1e-3;
+    const NORMAL_EPS = 1e-3; // origin offset along face normal — avoids self-hit
     const tempRay    = new THREE.Ray();
     const tempDir    = new THREE.Vector3();
     const tempOrigin = new THREE.Vector3();
@@ -354,6 +300,10 @@ export class HeatmapApplier {
       const ax = triVerts[b],     ay = triVerts[b + 1], az = triVerts[b + 2];
       const bx = triVerts[b + 3], by = triVerts[b + 4], bz = triVerts[b + 5];
       const cx = triVerts[b + 6], cy = triVerts[b + 7], cz = triVerts[b + 8];
+
+      // Pre-fetch face normal for this triangle
+      const nb = t * 3;
+      const nx = triNormals[nb], ny = triNormals[nb + 1], nz = triNormals[nb + 2];
 
       const samplesPerTri = Math.max(1, Math.round(triAreas[t] * densityScale));
       const rng = makePrng(t * 2654435761);
@@ -411,17 +361,25 @@ export class HeatmapApplier {
           const invDist = 1.0 / distToCam;
           tempDir.set(-d_x * invDist, -d_y * invDist, -d_z * invDist);
 
-          // Offset origin to avoid self-intersection
+          // Back-face cull: if the surface normal points away from the camera
+          // the point is on the back side of the face — not visible.
+          // dot(normal, toCamera) = -dot(d, N) / |d|
+          const nDotToCamera = -(d_x * nx + d_y * ny + d_z * nz) * invDist;
+          if (nDotToCamera <= 0) continue;
+
+          // Offset origin along face normal to avoid self-intersection.
+          // Normal-bias is robust at all camera angles; direction-bias fails
+          // when the ray is nearly parallel to the surface.
           tempOrigin.set(
-            px + tempDir.x * SHADOW_EPS,
-            py + tempDir.y * SHADOW_EPS,
-            pz + tempDir.z * SHADOW_EPS,
+            px + nx * NORMAL_EPS,
+            py + ny * NORMAL_EPS,
+            pz + nz * NORMAL_EPS,
           );
           tempRay.set(tempOrigin, tempDir);
 
           const hit = bvh.raycastFirst(tempRay, THREE.DoubleSide as THREE.Side);
           // No hit → unoccluded.  Hit past camera → not blocked.
-          if (!hit || hit.distance >= distToCam - SHADOW_EPS) {
+          if (!hit || hit.distance >= distToCam - NORMAL_EPS) {
             visible++;
           }
         }

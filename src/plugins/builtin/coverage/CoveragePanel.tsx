@@ -419,9 +419,8 @@ export const CoveragePanel: React.FC = () => {
       setHeatmap(false);
     } else {
       // ── Turn on ──────────────────────────────────────────────────────
-      const nodeMap: Map<string, THREE.Object3D> = (vm as any).nodeMap;
       const scene: THREE.Scene | undefined = (vm as any).scene;
-      if (!nodeMap || !scene) return;
+      if (!scene) return;
 
       // Create the heatmap DAG node (visible in Outliner + Attribute Editor)
       const hmNode = new CoverageHeatmapNode();
@@ -431,8 +430,6 @@ export const CoveragePanel: React.FC = () => {
 
       heatmapRef.current.apply(
         res.cameraCenters,
-        res.sourceMeshes,
-        nodeMap,
         scene,
         hmNode.density.getValue(),
         hmNode.pointSize.getValue(),
