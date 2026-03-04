@@ -6,6 +6,7 @@ import type { Vector3Data } from '../../core/dag/DAGNode';
 import { CameraNode } from '../../core/dag/CameraNode';
 import { LightNode } from '../../core/dag/LightNode';
 import { GltfNode } from '../../core/dag/GltfNode';
+import { SplatNode } from '../../core/dag/SplatNode';
 import type { Command } from '../../core/system/CommandHistory';
 import { TransformCommand } from '../../core/system/commands/TransformCommand';
 import { CAMERA_PRESET_GROUPS, CAMERA_PRESET_MAP } from '../data/cameraPresets';
@@ -357,6 +358,79 @@ const LightSection: React.FC<{ node: LightNode; onChange: () => void }> = ({ nod
     </>
   );
 };
+// ── Splat / Crop Volume section ───────────────────────────────────────────────
+const SPLAT_CROP_PLUGS = new Set(['cropEnabled','cropMinX','cropMinY','cropMinZ','cropMaxX','cropMaxY','cropMaxZ']);
+
+const SplatSection: React.FC<{ node: SplatNode; onChange: () => void }> = ({ node, onChange }) => {
+  const [open, setOpen] = useState(true);
+  const [enabled, setEnabled] = useState(node.cropEnabled.getValue());
+  const [minX, setMinX] = useState(node.cropMinX.getValue());
+  const [minY, setMinY] = useState(node.cropMinY.getValue());
+  const [minZ, setMinZ] = useState(node.cropMinZ.getValue());
+  const [maxX, setMaxX] = useState(node.cropMaxX.getValue());
+  const [maxY, setMaxY] = useState(node.cropMaxY.getValue());
+  const [maxZ, setMaxZ] = useState(node.cropMaxZ.getValue());
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setEnabled(node.cropEnabled.getValue());
+      setMinX(node.cropMinX.getValue()); setMinY(node.cropMinY.getValue()); setMinZ(node.cropMinZ.getValue());
+      setMaxX(node.cropMaxX.getValue()); setMaxY(node.cropMaxY.getValue()); setMaxZ(node.cropMaxZ.getValue());
+    }, 100);
+    return () => clearInterval(id);
+  }, [node]);
+
+  const setFloat = (setter: (v: number) => void, setValue: (v: number) => void) =>
+    (raw: string) => { const n = parseFloat(raw); if (!isNaN(n)) { setValue(n); setter(n); onChange(); } };
+
+  const subHeader = (label: string) => (
+    <div style={{
+      padding: '2px 8px', fontSize: 10, color: C.dim,
+      borderBottom: `1px solid ${C.border}`,
+      fontFamily: '"Segoe UI",sans-serif',
+      textTransform: 'uppercase', letterSpacing: '0.4px',
+      background: C.strip,
+    }}>{label}</div>
+  );
+
+  return (
+    <>
+      <Sec title="Crop Volume" tag="splat" open={open} onToggle={() => setOpen(v => !v)} accent />
+      {open && (
+        <>
+          {/* Enable toggle */}
+          <div style={{ display: 'grid', gridTemplateColumns: '42% 1fr', borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ padding: '3px 8px', fontSize: 11, color: C.muted, borderRight: `1px solid ${C.border}`,
+              fontFamily: '"Segoe UI",sans-serif', display: 'flex', alignItems: 'center' }}>Enabled</div>
+            <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center' }}>
+              <input type="checkbox" checked={enabled} onChange={e => {
+                setEnabled(e.target.checked);
+                node.cropEnabled.setValue(e.target.checked);
+                onChange();
+              }} />
+            </div>
+          </div>
+          {/* Min corner */}
+          {subHeader('Min Corner')}
+          <CRow label="Min X" value={+minX.toFixed(3)}
+            onChange={setFloat(v => node.cropMinX.setValue(v), setMinX)} />
+          <CRow label="Min Y" value={+minY.toFixed(3)}
+            onChange={setFloat(v => node.cropMinY.setValue(v), setMinY)} />
+          <CRow label="Min Z" value={+minZ.toFixed(3)}
+            onChange={setFloat(v => node.cropMinZ.setValue(v), setMinZ)} />
+          {/* Max corner */}
+          {subHeader('Max Corner')}
+          <CRow label="Max X" value={+maxX.toFixed(3)}
+            onChange={setFloat(v => node.cropMaxX.setValue(v), setMaxX)} />
+          <CRow label="Max Y" value={+maxY.toFixed(3)}
+            onChange={setFloat(v => node.cropMaxY.setValue(v), setMaxY)} />
+          <CRow label="Max Z" value={+maxZ.toFixed(3)}
+            onChange={setFloat(v => node.cropMaxZ.setValue(v), setMaxZ)} />
+        </>
+      )}
+    </>
+  );
+};
 // ── Node attributes section ───────────────────────────────────────────────────
 const NodeAttrs: React.FC<{ node: DAGNode; onChange: () => void; exclude?: Set<string> }> = ({ node, onChange, exclude }) => {
   const [open, setOpen] = useState(true);
@@ -497,6 +571,11 @@ export const AttributeEditorPanel: React.FC = () => {
           <LightSection node={selectedNode} onChange={onChange} />
         )}
 
+        {/* Splat crop volume — only for SplatNode */}
+        {selectedNode instanceof SplatNode && (
+          <SplatSection node={selectedNode} onChange={onChange} />
+        )}
+
         {/* Node-type-specific attributes (skip plugs already shown in dedicated sections) */}
         <NodeAttrs
           node={selectedNode}
@@ -505,7 +584,9 @@ export const AttributeEditorPanel: React.FC = () => {
             ? new Set(['lightType', 'color', 'intensity'])
             : selectedNode instanceof GltfNode
               ? new Set(['fileName'])
-              : undefined
+              : selectedNode instanceof SplatNode
+                ? new Set(['fileName', ...SPLAT_CROP_PLUGS])
+                : undefined
           }
         />
 

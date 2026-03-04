@@ -499,6 +499,10 @@ export class SplatMesh extends THREE.Object3D {
     // Optimisation options
     private _opts: SplatOpts = { ...DEFAULT_SPLAT_OPTS };
 
+    // Crop box (model-space AABB) — splats outside this box are hidden
+    private _cropMin: THREE.Vector3 | null = null;
+    private _cropMax: THREE.Vector3 | null = null;
+
     constructor() {
         super();
         this._buildGeometry();
@@ -837,6 +841,23 @@ export class SplatMesh extends THREE.Object3D {
     }
 
     // -----------------------------------------------------------------------
+    // Crop box — axis-aligned box in model (object) space.
+    // Splats outside the box are culled in _applyOrder.
+    // Calling either method forces a re-sort on the next frame.
+    // -----------------------------------------------------------------------
+    public setCropBox(min: THREE.Vector3, max: THREE.Vector3): void {
+        this._cropMin = min.clone();
+        this._cropMax = max.clone();
+        this._lastViewRow.fill(0); // invalidate cached view row → re-sort next frame
+    }
+
+    public clearCropBox(): void {
+        this._cropMin = null;
+        this._cropMax = null;
+        this._lastViewRow.fill(0);
+    }
+
+    // -----------------------------------------------------------------------
     // _applyOrder — single-pass: frustum-cull → screen-LOD → streaming-LOD → GPU
     //
     // "order" is back-to-front (order[0]=farthest).  All three filter stages
@@ -858,11 +879,12 @@ export class SplatMesh extends THREE.Object3D {
         const needFrustum = this._opts.frustumCull;
         const needLOD     = this._opts.lodFactor < 1.0 && this._maxScales !== null;
         const needStream  = this._opts.streamingLOD && this._grid !== null;
+        const needCrop    = this._cropMin !== null;
 
         let workOrder: Uint32Array = order;
         let workCount = n;
 
-        if (needFrustum || needLOD || needStream) {
+        if (needFrustum || needLOD || needStream || needCrop) {
             if (!this._tempOrder || this._tempOrder.length < n) {
                 this._tempOrder = new Uint32Array(n);
             }
@@ -883,10 +905,25 @@ export class SplatMesh extends THREE.Object3D {
             const ms    = this._maxScales!;
             const grid  = this._grid;
 
+            // Cache crop bounds as plain scalars for hot-path performance
+            const cMinX = needCrop ? this._cropMin!.x : 0;
+            const cMinY = needCrop ? this._cropMin!.y : 0;
+            const cMinZ = needCrop ? this._cropMin!.z : 0;
+            const cMaxX = needCrop ? this._cropMax!.x : 0;
+            const cMaxY = needCrop ? this._cropMax!.y : 0;
+            const cMaxZ = needCrop ? this._cropMax!.z : 0;
+
             let w = 0;
             for (let j = 0; j < n; j++) {
                 const i = order[j];
                 const px=pos[3*i], py=pos[3*i+1], pz=pos[3*i+2];
+
+                // ── 0. Crop box (model space) ────────────────────────────────
+                if (needCrop) {
+                    if (px < cMinX || px > cMaxX ||
+                        py < cMinY || py > cMaxY ||
+                        pz < cMinZ || pz > cMaxZ) continue;
+                }
 
                 // ── 1. Frustum cull ──────────────────────────────────────────
                 if (needFrustum) {

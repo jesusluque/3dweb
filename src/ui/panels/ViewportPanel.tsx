@@ -56,6 +56,8 @@ export const ViewportPanel: React.FC = () => {
   const camDropRef = useRef<HTMLDivElement>(null);
   /** Mirrors ViewportManager._editorsVisible for the overlay badge. */
   const [editorsVisible, setEditorsVisible] = useState(true);
+  /** True while the interactive crop gizmo is active (T key on a SplatNode). */
+  const [cropGizmoActive, setCropGizmoActive] = useState(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -132,7 +134,8 @@ export const ViewportPanel: React.FC = () => {
     if (!containerRef.current || !core) return;
     const vm = new ViewportManager(containerRef.current, core, { rendererType: vs.rendererType });
     vmRef.current = vm;
-    vm.onSceneChanged = markSceneDirty;
+    vm.onSceneChanged    = markSceneDirty;
+    vm.onCropModeChanged = (v) => setCropGizmoActive(v);
     // Register in store so CameraViewPanel can subscribe to frame events
     setViewportManager(vm);
     // Apply all current viewport settings to the freshly-created ViewportManager
@@ -591,6 +594,24 @@ export const ViewportPanel: React.FC = () => {
           </div>
         )}
 
+        {/* Crop gizmo active badge */}
+        {cropGizmoActive && (
+          <div style={{
+            pointerEvents: 'none',
+            fontSize: '10px',
+            color: '#ffaa00',
+            background: 'rgba(0,0,0,0.65)',
+            padding: '2px 7px',
+            borderRadius: '3px',
+            fontFamily: '"Segoe UI", system-ui, sans-serif',
+            letterSpacing: '0.04em',
+            marginRight: '4px',
+            border: '1px solid rgba(255,170,0,0.5)',
+          }}>
+            ✏️ CROP &nbsp;&middot;&nbsp; Esc=Exit
+          </div>
+        )}
+
         {/* Anaglyph active badge */}
         {vs.anaglyphEnabled && (
           <div style={{
@@ -633,7 +654,7 @@ export const ViewportPanel: React.FC = () => {
         fontFamily: '"Segoe UI", system-ui, sans-serif',
         zIndex: 20,
       }}>
-        W=Move &nbsp;·&nbsp; E=Rotate &nbsp;·&nbsp; R=Scale &nbsp;·&nbsp; T=Space
+        W=Move &nbsp;·&nbsp; E=Rotate &nbsp;·&nbsp; R=Scale &nbsp;·&nbsp; {cropGizmoActive ? 'T=Exit Crop  ·  Drag handles to resize' : 'T=Crop(Splat) / Space'}
       </div>
     </div>
   );

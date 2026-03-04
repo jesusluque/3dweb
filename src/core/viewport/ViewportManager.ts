@@ -29,6 +29,8 @@ function isDescendantOf(obj: THREE.Object3D, ancestor: THREE.Object3D): boolean 
   return false;
 }
 import { TransformCommand } from '../system/commands/TransformCommand';
+import { CropVolumeCommand } from '../system/commands/CropVolumeCommand';
+import { CropGizmo } from './CropGizmo';
 import { CreateNodeCommand } from '../system/commands/CreateNodeCommand';
 import { CreateGroupCommand } from '../system/commands/CreateGroupCommand';
 import { UngroupCommand } from '../system/commands/UngroupCommand';
@@ -103,8 +105,15 @@ export class ViewportManager {
   // ── Native Gaussian Splatting (SplatMesh – shares three.js depth buffer) ────
   /** Maps SplatNode UUID → the SplatMesh currently in the three.js scene. */
   private _splatMeshMap: Map<string, SplatMesh> = new Map();
+  /** Maps SplatNode UUID → its Box3Helper crop visualisation. */
+  private _splatCropHelperMap: Map<string, THREE.Box3Helper> = new Map();
   /** Current splat optimisation options applied to every SplatMesh. */
   private _splatOpts: SplatOpts = { ...DEFAULT_SPLAT_OPTS };
+
+  // ── Interactive Crop Gizmo (T key when SplatNode is selected) ─────────────
+  private _cropGizmo:         CropGizmo  | null = null;
+  private _cropGizmoNode:     SplatNode  | null = null;
+  private _cropGizmoActive  = false;
 
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
@@ -136,6 +145,8 @@ export class ViewportManager {
    *  Set by ViewportPanel to trigger a Zustand sceneVersion bump so the
    *  Outliner re-renders even when the action comes from a global hotkey. */
   public onSceneChanged?: () => void;
+  /** Fired when the crop-gizmo mode is toggled on or off (for UI indicators). */
+  public onCropModeChanged?: (active: boolean) => void;
 
   /** Pixel resolution used for the gate mask and CameraViewPanel crop. */
   private renderResolution: { w: number; h: number } = { w: 1920, h: 1080 };
@@ -339,6 +350,8 @@ export class ViewportManager {
     
     // Clicking empty space selection logic
     this.renderer.domElement.addEventListener('pointerdown', this.onPointerDown);
+    this.renderer.domElement.addEventListener('pointermove', this.onPointerMoveCrop);
+    this.renderer.domElement.addEventListener('pointerup',   this.onPointerUpCrop);
 
     this.onResize(); // trigger initial resize to fix aspect
 
@@ -373,6 +386,58 @@ export class ViewportManager {
     }
   }
 
+  /** Build a Raycaster from a PointerEvent's canvas position. */
+  private _buildRaycaster(e: PointerEvent): THREE.Raycaster {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
+    const y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+    const rc = new THREE.Raycaster();
+    rc.setFromCamera(new THREE.Vector2(x, y), this.camera);
+    return rc;
+  }
+
+  /** Pointer-move handler: drives hover highlight + active handle drag. */
+  private onPointerMoveCrop = (e: PointerEvent) => {
+    if (!this._cropGizmoActive || !this._cropGizmo) return;
+    const rc = this._buildRaycaster(e);
+    if (this._cropGizmo.isDragging) {
+      const result = this._cropGizmo.moveDrag(rc);
+      if (result && this._cropGizmoNode) {
+        // Push to SplatMesh directly for live preview (skips plug overhead)
+        const mesh   = this._splatMeshMap.get(this._cropGizmoNode.uuid);
+        const helper = this._splatCropHelperMap.get(this._cropGizmoNode.uuid);
+        if (mesh) mesh.setCropBox(result.min, result.max);
+        if (helper) { helper.box.set(result.min, result.max); helper.visible = true; }
+      }
+    } else {
+      this._cropGizmo.onHover(rc);
+    }
+  };
+
+  /** Pointer-up handler: commits drag to undo stack. */
+  private onPointerUpCrop = (e: PointerEvent) => {
+    if (!this._cropGizmoActive || !this._cropGizmo || !this._cropGizmo.isDragging) return;
+    const result = this._cropGizmo.endDrag();
+    this.controls.enabled = true;
+    this.renderer.domElement.releasePointerCapture(e.pointerId);
+    if (result && this._cropGizmoNode) {
+      const node    = this._cropGizmoNode;
+      const changed = !result.startMin.equals(result.endMin) || !result.startMax.equals(result.endMax);
+      // Commit plug values (fires applyCrop once per plug via onDirty)
+      node.cropMinX.setValue(result.endMin.x);
+      node.cropMinY.setValue(result.endMin.y);
+      node.cropMinZ.setValue(result.endMin.z);
+      node.cropMaxX.setValue(result.endMax.x);
+      node.cropMaxY.setValue(result.endMax.y);
+      node.cropMaxZ.setValue(result.endMax.z);
+      if (changed) {
+        const cmd = new CropVolumeCommand(node, result.startMin, result.startMax, result.endMin, result.endMax);
+        this.core.commandHistory.record(cmd);
+        this.core.logger.log(cmd.description!, 'command');
+      }
+    }
+  };
+
   private onPointerDown = (e: PointerEvent) => {
     // Focus the container so hotkeys work
     this.container.focus();
@@ -382,6 +447,20 @@ export class ViewportManager {
     
     // We only raycast on primary mouse button (left)
     if (e.button !== 0) return;
+
+    // ── Crop gizmo: check handles before selection ───────────────────────────
+    if (this._cropGizmoActive && this._cropGizmo) {
+      const rc  = this._buildRaycaster(e);
+      const hit = this._cropGizmo.hitTest(rc);
+      if (hit) {
+        this._cropGizmo.startDrag(hit.handle, hit.worldPoint, this.camera);
+        this.controls.enabled = false;
+        this.renderer.domElement.setPointerCapture(e.pointerId);
+        return; // handle consumed the event
+      }
+      // Gizmo active but no handle hit — allow orbit, don't change selection
+      return;
+    }
 
     // Quick raycast
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -456,8 +535,17 @@ export class ViewportManager {
         case 'w': this.setTransformMode('translate'); break;
         case 'e': this.setTransformMode('rotate');    break;
         case 'r': this.setTransformMode('scale');     break;
-        case 't':
-          this.transformControls.setSpace(this.transformControls.space === 'local' ? 'world' : 'local');
+        case 't': {
+          const _lead = this.core.selectionManager.getLeadSelection();
+          if (_lead instanceof SplatNode) {
+            this.toggleCropGizmo(_lead);
+          } else {
+            this.transformControls.setSpace(this.transformControls.space === 'local' ? 'world' : 'local');
+          }
+          break;
+        }
+        case 'escape':
+          if (this._cropGizmoActive) { this.disableCropGizmo(); }
           break;
         case 'q': this.setTransformMode('select'); break;
         case 'f': this.frameSelected(); break;
@@ -518,11 +606,20 @@ export class ViewportManager {
 
   private syncSelection() {
     const lead = this.core.selectionManager.getLeadSelection();
+
+    // Deactivate crop gizmo when selection moves away from the gizmo node
+    if (this._cropGizmoActive && this._cropGizmoNode && lead !== this._cropGizmoNode) {
+      this._deactivateCropGizmo();
+    }
+
     if (lead && this.nodeMap.has(lead.uuid)) {
-      this.transformControls.enabled = true;
-      // Don't re-show the gizmo if editor gizmos are currently hidden (G key)
-      if (this._editorsVisible) {
-        this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+      // Don't re-attach transform controls while crop gizmo is active
+      if (!this._cropGizmoActive) {
+        this.transformControls.enabled = true;
+        // Don't re-show the gizmo if editor gizmos are currently hidden (G key)
+        if (this._editorsVisible) {
+          this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+        }
       }
     } else {
       this.transformControls.detach();
@@ -530,6 +627,73 @@ export class ViewportManager {
     }
     this.updateOutlines();
   }
+
+  // ── Crop Gizmo public API ────────────────────────────────────────────────
+
+  /** Toggle the crop gizmo for a SplatNode (bound to T key when a splat is selected). */
+  public toggleCropGizmo(node: SplatNode) {
+    if (this._cropGizmoActive && this._cropGizmoNode === node) {
+      this.disableCropGizmo();
+    } else {
+      this._activateCropGizmo(node);
+    }
+  }
+
+  private _activateCropGizmo(node: SplatNode) {
+    // Tear down any existing gizmo first
+    if (this._cropGizmo) this._deactivateCropGizmo();
+
+    const obj = this.nodeMap.get(node.uuid);
+    if (!obj) return;
+
+    // Auto-enable crop so the effect is immediately visible
+    if (!node.cropEnabled.getValue()) node.cropEnabled.setValue(true);
+
+    const min = new THREE.Vector3(node.cropMinX.getValue(), node.cropMinY.getValue(), node.cropMinZ.getValue());
+    const max = new THREE.Vector3(node.cropMaxX.getValue(), node.cropMaxY.getValue(), node.cropMaxZ.getValue());
+
+    const gizmo = new CropGizmo(min, max);
+    obj.add(gizmo);
+
+    this._cropGizmo     = gizmo;
+    this._cropGizmoNode = node;
+    this._cropGizmoActive = true;
+
+    // Hide transform controls while crop mode is active
+    this.transformControls.detach();
+
+    this.onCropModeChanged?.(true);
+  }
+
+  private _deactivateCropGizmo() {
+    if (!this._cropGizmo || !this._cropGizmoNode) return;
+
+    const prevNode = this._cropGizmoNode;
+    const obj      = this.nodeMap.get(prevNode.uuid);
+    if (obj) obj.remove(this._cropGizmo);
+    this._cropGizmo.dispose();
+    this._cropGizmo     = null;
+    this._cropGizmoNode = null;
+    this._cropGizmoActive = false;
+    this.controls.enabled = true;
+
+    // Re-attach TransformControls if the same node is still selected
+    const lead = this.core.selectionManager.getLeadSelection();
+    if (lead && lead.uuid === prevNode.uuid && this._editorsVisible) {
+      this.transformControls.enabled = true;
+      this.transformControls.attach(this.nodeMap.get(lead.uuid)!);
+    }
+
+    this.onCropModeChanged?.(false);
+  }
+
+  /** Deactivate crop gizmo (can be called from outside, e.g. Escape or toolbar). */
+  public disableCropGizmo() {
+    this._deactivateCropGizmo();
+  }
+
+  /** Returns true if the crop gizmo is currently active. */
+  public get cropGizmoActive() { return this._cropGizmoActive; }
 
   /** Rebuild selection outlines to match the current selection set. */
   private updateOutlines() {
@@ -872,6 +1036,46 @@ export class ViewportManager {
         loadSplat(node.fileData, node.fileFormat);
       }
 
+      // ── Crop volume: Box3Helper + plug wiring ─────────────────────────────
+      const applyCrop = () => {
+        const mesh = this._splatMeshMap.get(node.uuid);
+        const enabled = node.cropEnabled.getValue();
+        const cMin = new THREE.Vector3(
+          node.cropMinX.getValue(), node.cropMinY.getValue(), node.cropMinZ.getValue(),
+        );
+        const cMax = new THREE.Vector3(
+          node.cropMaxX.getValue(), node.cropMaxY.getValue(), node.cropMaxZ.getValue(),
+        );
+        if (mesh) {
+          if (enabled) mesh.setCropBox(cMin, cMax);
+          else mesh.clearCropBox();
+        }
+        const helper = this._splatCropHelperMap.get(node.uuid);
+        if (helper) {
+          helper.visible = enabled;
+          helper.box.set(cMin, cMax);
+        }
+      };
+
+      // Box3Helper lives as a child of the node group → inherits TRS automatically
+      const cropBox = new THREE.Box3(
+        new THREE.Vector3(node.cropMinX.getValue(), node.cropMinY.getValue(), node.cropMinZ.getValue()),
+        new THREE.Vector3(node.cropMaxX.getValue(), node.cropMaxY.getValue(), node.cropMaxZ.getValue()),
+      );
+      const cropHelper = new THREE.Box3Helper(cropBox, new THREE.Color(0xffaa00));
+      cropHelper.visible = node.cropEnabled.getValue();
+      obj.add(cropHelper);
+      this._splatCropHelperMap.set(node.uuid, cropHelper);
+
+      // Wire all crop plugs
+      node.cropEnabled.onDirty = applyCrop;
+      node.cropMinX.onDirty   = applyCrop;
+      node.cropMinY.onDirty   = applyCrop;
+      node.cropMinZ.onDirty   = applyCrop;
+      node.cropMaxX.onDirty   = applyCrop;
+      node.cropMaxY.onDirty   = applyCrop;
+      node.cropMaxZ.onDirty   = applyCrop;
+
     } else {
       obj = new THREE.Group();
     }
@@ -980,6 +1184,9 @@ export class ViewportManager {
     for (const [, ch] of this.cameraHelperMap) {
       if (ch.helper.visible) ch.helper.update();
     }
+
+    // ── Crop gizmo: constant-size handles + hover ───────────────────────────
+    if (this._cropGizmo) this._cropGizmo.updateHandleScale(this.camera);
 
     // ── Per-frame splat sort + uniform update (before draw) ────────────────
     this._updateSplats();
@@ -1366,6 +1573,16 @@ export class ViewportManager {
     if (splatMesh) {
       splatMesh.dispose();
       this._splatMeshMap.delete(uuid);
+    }
+    // Clean up crop helper (child of the node group, removed with scene.remove(obj))
+    this._splatCropHelperMap.delete(uuid);
+    // Deactivate crop gizmo if it belongs to the node being removed
+    if (this._cropGizmoNode?.uuid === uuid) {
+      this._cropGizmo     = null;
+      this._cropGizmoNode = null;
+      this._cropGizmoActive = false;
+      this.controls.enabled = true;
+      this.onCropModeChanged?.(false);
     }
   }
 
@@ -2171,6 +2388,9 @@ export class ViewportManager {
     window.removeEventListener('keydown', this.onWindowKeyDown);
     this.container.removeEventListener('keydown', this.onKeyDown);
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
+    this.renderer.domElement.removeEventListener('pointermove', this.onPointerMoveCrop);
+    this.renderer.domElement.removeEventListener('pointerup',   this.onPointerUpCrop);
+    if (this._cropGizmo) { this._cropGizmo.dispose(); this._cropGizmo = null; }
     this.transformControls.dispose();
     this.controls.dispose();
     this._destroyAnaglyphResources();
