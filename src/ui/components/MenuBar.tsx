@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAppStore, ShadingModeType } from '../store/useAppStore';
 import { dispatchScene, dispatchViewport } from '../buses';
 import { CameraNode } from '../../core/dag/CameraNode';
+import { DAGNode } from '../../core/dag/DAGNode';
 import { RESOLUTION_PRESET_GROUPS } from '../data/resolutionPresets';
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -219,6 +220,33 @@ export const MenuBar: React.FC = () => {
   const gizmoUp   = () => { const s = Math.min(5, vs.gizmoSize + 0.15); updateVS({ gizmoSize: s }); dispatchViewport.setGizmoSize(s); };
   const gizmoDown = () => { const s = Math.max(0.1, vs.gizmoSize - 0.15); updateVS({ gizmoSize: s }); dispatchViewport.setGizmoSize(s); };
 
+  /* ── Selection helpers ──────────────────────────────────── */
+  const selectAllNodes = () => {
+    if (!core) return;
+    const all = Array.from(core.sceneGraph.nodes.values()).filter(
+      n => n !== core.sceneGraph.root,
+    );
+    core.selectionManager.selectMany(all);
+  };
+  const invertSelection = () => {
+    if (!core) return;
+    const all = Array.from(core.sceneGraph.nodes.values()).filter(
+      n => n !== core.sceneGraph.root,
+    );
+    const current = new Set(core.selectionManager.getSelection().map(n => n.uuid));
+    core.selectionManager.selectMany(all.filter(n => !current.has(n.uuid)));
+  };
+
+  const selectHierarchy = () => {
+    if (!core) return;
+    const roots = core.selectionManager.getSelection();
+    if (roots.length === 0) return;
+    const collected: DAGNode[] = [];
+    const visit = (n: DAGNode) => { collected.push(n); n.children.forEach(visit); };
+    roots.forEach(visit);
+    core.selectionManager.selectMany(collected);
+  };
+
   /* ── Resolution presets as sub-menu ── */
   const resolutionSubmenu: MenuItem[] = RESOLUTION_PRESET_GROUPS.flatMap(g => [
     { label: g.group, divider: false, disabled: true } as MenuItem,
@@ -274,9 +302,9 @@ export const MenuBar: React.FC = () => {
         { label: 'Copy',   shortcut: '⌘C',   disabled: true, action: () => {} },
         { label: 'Paste',  shortcut: '⌘V',   disabled: true, action: () => {} },
         { divider: true } as MenuItem,
-        { label: 'Select All',      shortcut: '⌘A', action: () => {} },
+        { label: 'Select All',      shortcut: '⌘A', action: selectAllNodes },
         { label: 'Deselect All',    shortcut: '⌘D', action: () => core?.selectionManager.clear() },
-        { label: 'Invert Selection',                 action: () => {} },
+        { label: 'Invert Selection',                 action: invertSelection },
         { divider: true } as MenuItem,
         { label: 'Duplicate',  shortcut: '⌘D',  action: () => dispatchScene.duplicateSelected() },
         { label: 'Delete',     shortcut: 'Del',  action: () => dispatchScene.deleteSelected() },
@@ -312,11 +340,11 @@ export const MenuBar: React.FC = () => {
     {
       label: 'Select',
       items: [
-        { label: 'All',       shortcut: '⌘A', action: () => {} },
+        { label: 'All',       shortcut: '⌘A', action: selectAllNodes },
         { label: 'None',      shortcut: '⌘D', action: () => core?.selectionManager.clear() },
-        { label: 'Invert',                     action: () => {} },
+        { label: 'Invert',                     action: invertSelection },
         { divider: true } as MenuItem,
-        { label: 'Hierarchy', disabled: true,  action: () => {} },
+        { label: 'Hierarchy', action: selectHierarchy },
       ],
     },
 

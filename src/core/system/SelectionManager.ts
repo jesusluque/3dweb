@@ -49,4 +49,11 @@ export class SelectionManager {
   public getSelection(): DAGNode[] {
     return Array.from(this.selectedNodes);
   }
+
+  /** Replace the current selection with an arbitrary set of nodes, firing one notification. */
+  public selectMany(nodes: DAGNode[]): void {
+    this.selectedNodes.clear();
+    for (const n of nodes) this.selectedNodes.add(n);
+    this.notify();
+  }
 }

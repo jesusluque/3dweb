@@ -742,6 +742,23 @@ export class ViewportManager {
         light = pl;
       } else if (type === 'ambient') {
         light = new THREE.AmbientLight(colorHex, intensity);
+        // Discrete ambient indicator: small wireframe octahedron at half opacity
+        const ambGeo = new THREE.OctahedronGeometry(0.12);
+        const ambMat = new THREE.MeshBasicMaterial({
+          color: colorHex, wireframe: true, transparent: true, opacity: 0.45,
+        });
+        obj = new THREE.Group();
+        obj.add(light, new THREE.Mesh(ambGeo, ambMat));
+        this.lightHelperMap.set(node.uuid, { light, helper: null });
+        this.lights.push(light);
+        const refreshAmbient = () => {
+          const c = node.color.getValue();
+          (light as any).color?.set(c);
+          light.intensity = node.intensity.getValue();
+          ambMat.color.set(c);
+        };
+        node.color.onDirty     = refreshAmbient;
+        node.intensity.onDirty = refreshAmbient;
       } else if (type === 'spot') {
         const sl = new THREE.SpotLight(colorHex, intensity);
         sl.angle = Math.PI / 6;
@@ -757,28 +774,33 @@ export class ViewportManager {
       if (sceneHelper) this.scene.add(sceneHelper);
 
       // Visible indicator: small emissive sphere so you can click/see the light
-      const indicator = new THREE.Mesh(
-        new THREE.SphereGeometry(0.08, 8, 6),
-        new THREE.MeshBasicMaterial({ color: colorHex }),
-      );
+      // (ambient lights use an OctahedronGeometry and are handled above)
+      if (type === 'ambient') {
+        // already fully handled in the ambient branch above
+      } else {
+        const indicator = new THREE.Mesh(
+          new THREE.SphereGeometry(0.08, 8, 6),
+          new THREE.MeshBasicMaterial({ color: colorHex }),
+        );
 
       obj = new THREE.Group();
-      obj.add(light, indicator);
+        obj.add(light, indicator);
 
-      // Track for setLightingEnabled / removeNodeFromView
-      this.lightHelperMap.set(node.uuid, { light, helper: sceneHelper });
-      this.lights.push(light); // also register in legacy array for setLightingEnabled
+        // Track for setLightingEnabled / removeNodeFromView
+        this.lightHelperMap.set(node.uuid, { light, helper: sceneHelper });
+        this.lights.push(light); // also register in legacy array for setLightingEnabled
 
-      // Wire plug changes → live light update
-      const refreshLight = () => {
-        const c = node.color.getValue();
-        (light as any).color?.set(c);
-        light.intensity = node.intensity.getValue();
-        (indicator.material as THREE.MeshBasicMaterial).color.set(c);
-        (sceneHelper as any)?.update?.();
-      };
-      node.color.onDirty     = refreshLight;
-      node.intensity.onDirty = refreshLight;
+        // Wire plug changes → live light update
+        const refreshLight = () => {
+          const c = node.color.getValue();
+          (light as any).color?.set(c);
+          light.intensity = node.intensity.getValue();
+          (indicator.material as THREE.MeshBasicMaterial).color.set(c);
+          (sceneHelper as any)?.update?.();
+        };
+        node.color.onDirty     = refreshLight;
+        node.intensity.onDirty = refreshLight;
+      }
 
     } else if (node instanceof GltfNode) {
       // ── GLTF imported model ───────────────────────────────────────────────

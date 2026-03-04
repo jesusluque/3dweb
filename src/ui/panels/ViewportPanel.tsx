@@ -147,6 +147,9 @@ export const ViewportPanel: React.FC = () => {
     vm.setGizmoSize(vs.gizmoSize);
     vm.setTransformSpace(vs.transformSpace);
     if (vs.anaglyphEnabled) vm.setAnaglyphEnabled(true, vs.anaglyphIPD);
+    // Trigger initial outliner render — createDefaultLights() fires before
+    // onSceneChanged is assigned, so we must dirty the scene manually here.
+    markSceneDirty();
 
     // ── Connect toolbar buses → ViewportManager ──────────────────────────
     const onTool        = (e: Event) => vm.setTransformMode((e as CustomEvent).detail);
@@ -630,7 +633,7 @@ export const ViewportPanel: React.FC = () => {
         fontFamily: '"Segoe UI", system-ui, sans-serif',
         zIndex: 20,
       }}>
-        W=Move &nbsp;·&nbsp; E=Rotate &nbsp;·&nbsp; R=Scale &nbsp;·&nbsp; T=Space &nbsp;·&nbsp; Q=Detach
+        W=Move &nbsp;·&nbsp; E=Rotate &nbsp;·&nbsp; R=Scale &nbsp;·&nbsp; T=Space
       </div>
     </div>
   );

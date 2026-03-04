@@ -31,6 +31,6 @@ export class EngineCore {
     this.sceneGraph.addNode(mesh);
 
     this.logger.log('Scene initialized with default camera and cube.', 'info');
-    this.logger.log('Select objects with LMB. W=Translate  E=Rotate  R=Scale  T=Toggle Space  Q=Detach', 'info');
+    this.logger.log('Select objects with LMB. W=Translate  E=Rotate  R=Scale  T=Toggle Space', 'info');
   }
 }

@@ -115,12 +115,6 @@ export const Toolbar: React.FC = () => {
       </span>
       <TBtn icon={<Plus size={12}/>} label="Increase Manipulator Size  (+)" shortcut="+"
         onClick={() => { const s = Math.min(5, vs.gizmoSize + 0.15); updateVS({ gizmoSize: s }); dispatchViewport.setGizmoSize(s); }} />
-
-      {/* current tool label */}
-      <span style={{ fontSize: 10, color: 'var(--maya-accent)', marginLeft: 6,
-        fontFamily: '"Segoe UI",system-ui,sans-serif', letterSpacing: '0.4px' }}>
-        {activeTool.toUpperCase()}
-      </span>
     </>
   );
 
