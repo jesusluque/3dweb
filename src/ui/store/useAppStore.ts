@@ -13,7 +13,7 @@ import { type SplatOptSettings, DEFAULT_SPLAT_OPT } from '../buses';
 export interface FloatingWindowState {
   id: string;
   title: string;
-  type: 'camera_view';
+  type: 'camera_view' | 'coverage';
   payload?: Record<string, any>;
   rect: { x: number; y: number; w: number; h: number };
   minimised: boolean;
@@ -106,6 +106,8 @@ interface AppState {
   updateViewportSettings: (patch: Partial<ViewportSettings>) => void;
   /** Open a floating Camera View window for a specific CameraNode. */
   openCameraView: (cameraUuid: string, cameraName: string) => void;
+  /** Open the Coverage Analysis floating panel (creates one if not already open). */
+  openCoveragePanel: () => void;
   closeFloatingWindow: (id: string) => void;
   focusFloatingWindow: (id: string) => void;
   minimiseFloatingWindow: (id: string) => void;
@@ -163,6 +165,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateViewportSettings: (patch) => set(s => ({ viewportSettings: { ...s.viewportSettings, ...patch } })),
 
   // ── Floating windows ─────────────────────────────────────────────────
+  openCoveragePanel: () => {
+    const wins = get().floatingWindows;
+    // Only open one coverage panel at a time
+    const existing = wins.find(w => w.type === 'coverage');
+    if (existing) {
+      // Bring to front
+      get().focusFloatingWindow(existing.id);
+      if (existing.minimised) get().restoreFloatingWindow(existing.id);
+      return;
+    }
+    const maxZ = wins.reduce((m, w) => Math.max(m, w.zOrder), 0);
+    const newWin: FloatingWindowState = {
+      id: `coverage_${Date.now()}`,
+      title: 'Coverage Analysis',
+      type: 'coverage',
+      payload: {},
+      rect: { x: 80, y: 60, w: 560, h: 500 },
+      minimised: false,
+      zOrder: maxZ + 1,
+    };
+    set({ floatingWindows: [...wins, newWin] });
+  },
+
   openCameraView: (cameraUuid: string, cameraName: string) => {
     const wins = get().floatingWindows;
 

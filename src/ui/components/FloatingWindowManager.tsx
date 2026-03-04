@@ -2,8 +2,9 @@ import React from 'react';
 import { FloatingWindow } from './FloatingWindow';
 import { CameraMosaicOverlay } from './CameraMosaicOverlay';
 import { CameraViewPanel } from '../panels/CameraViewPanel';
+import { CoveragePanel } from '../../plugins/builtin/coverage/CoveragePanel';
 import { useAppStore } from '../store/useAppStore';
-import { Camera } from 'lucide-react';
+import { Camera, BarChart2 } from 'lucide-react';
 import { CameraNode } from '../../core/dag/CameraNode';
 
 /**
@@ -70,6 +71,9 @@ export const FloatingWindowManager: React.FC = () => {
           {win.type === 'camera_view' && (
             <CameraViewPanel cameraUuid={camUuid} />
           )}
+          {win.type === 'coverage' && (
+            <CoveragePanel />
+          )}
         </FloatingWindow>
         );
       })}
@@ -86,7 +90,7 @@ export const FloatingWindowManager: React.FC = () => {
           pointerEvents: 'auto',
         }}>
           {minimised.map(win => (
-            <button
+              <button
               key={win.id}
               onClick={() => restoreFloatingWindow(win.id)}
               title={win.title}
@@ -104,7 +108,10 @@ export const FloatingWindowManager: React.FC = () => {
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.12)'; }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)'; }}
             >
-              <Camera size={10} style={{ flexShrink: 0, color: '#a0c8f0' }} />
+              {win.type === 'coverage'
+                ? <BarChart2 size={10} style={{ flexShrink: 0, color: '#a0f0c8' }} />
+                : <Camera    size={10} style={{ flexShrink: 0, color: '#a0c8f0' }} />
+              }
               {win.title}
             </button>
           ))}

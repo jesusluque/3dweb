@@ -7,6 +7,7 @@ import { CameraNode } from '../../core/dag/CameraNode';
 import { LightNode } from '../../core/dag/LightNode';
 import { GltfNode } from '../../core/dag/GltfNode';
 import { SplatNode } from '../../core/dag/SplatNode';
+import { CoverageHeatmapNode } from '../../plugins/builtin/coverage/CoverageHeatmapNode';
 import type { Command } from '../../core/system/CommandHistory';
 import { TransformCommand } from '../../core/system/commands/TransformCommand';
 import { CAMERA_PRESET_GROUPS, CAMERA_PRESET_MAP } from '../data/cameraPresets';
@@ -558,6 +559,42 @@ const SplatSection: React.FC<{ node: SplatNode; onChange: () => void }> = ({ nod
     </>
   );
 };
+// ── Coverage Heatmap section ─────────────────────────────────────────────────
+const HeatmapSection: React.FC<{ node: CoverageHeatmapNode; onChange: () => void }> = ({ node, onChange }) => {
+  const [open,      setOpen]      = useState(true);
+  const [density,   setDensity]   = useState(node.density.getValue());
+  const [pointSize, setPointSize] = useState(node.pointSize.getValue());
+  const [opacity,   setOpacity]   = useState(node.opacity.getValue());
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setDensity(node.density.getValue());
+      setPointSize(node.pointSize.getValue());
+      setOpacity(node.opacity.getValue());
+    }, 80);
+    return () => clearInterval(id);
+  }, [node]);
+
+  return (
+    <>
+      <Sec title="Coverage Heatmap" tag="overlay" open={open} onToggle={() => setOpen(v => !v)} accent />
+      {open && (
+        <>
+          <NumRow label="Density" value={density} decimals={1} color={C.orange}
+            onChange={v => { const clamped = Math.max(1, Math.min(32, v)); setDensity(clamped); node.density.setValue(clamped); onChange(); }}
+            onCommit={v => { const clamped = Math.max(1, Math.min(32, v)); node.density.setValue(clamped); onChange(); }} />
+          <NumRow label="Point Size" value={pointSize} decimals={2} color={C.blue}
+            onChange={v => { const clamped = Math.max(0.05, Math.min(8, v)); setPointSize(clamped); node.pointSize.setValue(clamped); onChange(); }}
+            onCommit={v => { const clamped = Math.max(0.05, Math.min(8, v)); node.pointSize.setValue(clamped); onChange(); }} />
+          <NumRow label="Opacity" value={opacity} decimals={2} color={C.green}
+            onChange={v => { const clamped = Math.max(0, Math.min(1, v)); setOpacity(clamped); node.opacity.setValue(clamped); onChange(); }}
+            onCommit={v => { const clamped = Math.max(0, Math.min(1, v)); node.opacity.setValue(clamped); onChange(); }} />
+        </>
+      )}
+    </>
+  );
+};
+
 // ── Generic Node Attributes section ───────────────────────────────────────────
 const NodeAttrs: React.FC<{ node: DAGNode; onChange: () => void; exclude?: Set<string> }> = ({ node, onChange, exclude }) => {
   const [open, setOpen] = useState(true);
@@ -690,6 +727,9 @@ export const AttributeEditorPanel: React.FC = () => {
         {selectedNode instanceof SplatNode && (
           <SplatSection node={selectedNode} onChange={onChange} />
         )}
+        {selectedNode instanceof CoverageHeatmapNode && (
+          <HeatmapSection node={selectedNode} onChange={onChange} />
+        )}
 
         <NodeAttrs
           node={selectedNode}
@@ -701,7 +741,9 @@ export const AttributeEditorPanel: React.FC = () => {
                 ? new Set(['fileName'])
                 : selectedNode instanceof SplatNode
                   ? new Set(['fileName', ...SPLAT_CROP_PLUGS])
-                  : undefined
+                  : selectedNode instanceof CoverageHeatmapNode
+                    ? new Set(['density','pointSize','opacity'])
+                    : undefined
           }
         />
 

@@ -1,13 +1,26 @@
 import { useEffect } from 'react';
 import { AppLayout } from './ui/Layout';
 import { useAppStore } from './ui/store/useAppStore';
+import { pluginRegistry } from './plugins/PluginRegistry';
+import { coveragePlugin } from './plugins/builtin/coverage';
+
+// ── Register plugins (once at module load) ──────────────────────────────────
+pluginRegistry.register(coveragePlugin);
 
 function App() {
   const initCore = useAppStore(state => state.initCore);
+  const core     = useAppStore(state => state.core);
 
   useEffect(() => {
     initCore();
   }, [initCore]);
+
+  // Activate all plugins once the engine core is available
+  useEffect(() => {
+    if (core) {
+      pluginRegistry.activateAll(core);
+    }
+  }, [core]);
 
   // Global keyboard shortcuts for File operations (⌘/Ctrl + N, O, S, ⇧S)
   useEffect(() => {

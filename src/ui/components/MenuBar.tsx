@@ -4,6 +4,7 @@ import { dispatchScene, dispatchViewport } from '../buses';
 import { CameraNode } from '../../core/dag/CameraNode';
 import { DAGNode } from '../../core/dag/DAGNode';
 import { RESOLUTION_PRESET_GROUPS } from '../data/resolutionPresets';
+import { pluginRegistry } from '../../plugins/PluginRegistry';
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    Menu data types
@@ -182,6 +183,7 @@ export const MenuBar: React.FC = () => {
   const vs                = useAppStore(s => s.viewportSettings);
   const updateVS          = useAppStore(s => s.updateViewportSettings);
   const openCameraView    = useAppStore(s => s.openCameraView);
+  const openCoveragePanel = useAppStore(s => s.openCoveragePanel);
   const floatingWindows   = useAppStore(s => s.floatingWindows);
   const closeFloatingWindow  = useAppStore(s => s.closeFloatingWindow);
   const restoreFloatingWindow = useAppStore(s => s.restoreFloatingWindow);
@@ -460,6 +462,16 @@ export const MenuBar: React.FC = () => {
         { label: 'About…', action: () => alert('3D Web Simulator — Maya-inspired\nBuilt with Three.js + React') },
       ],
     },
+
+    /* ────── ANALYZE (contributed by plugins) ────── */
+    ...(pluginRegistry.getMenuContributions('Analyze').length > 0 ? [{
+      label: 'Analyze',
+      items: pluginRegistry.getMenuContributions('Analyze').map(c => ({
+        label: c.label,
+        shortcut: c.shortcut,
+        action: () => c.action(core, () => ({ openCoveragePanel })),
+      })),
+    } as Menu] : []),
   ];
 
   return (
