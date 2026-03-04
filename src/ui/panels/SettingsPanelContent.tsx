@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAppStore, ShadingModeType, type SplatOptSettings } from '../store/useAppStore';
+import { useAppStore, ShadingModeType, type SplatOptSettings, type ViewportSettings } from '../store/useAppStore';
 import { dispatchViewport } from '../buses';
 import { RESOLUTION_PRESET_GROUPS } from '../data/resolutionPresets';
 
@@ -135,8 +135,9 @@ const RadioRow: React.FC<{
 // ── Slider row ─────────────────────────────────────────────────────────────────
 const SliderRow: React.FC<{
   label: string; value: number; min: number; max: number; step: number;
+  unit?: string;
   onChange: (v: number) => void;
-}> = ({ label, value, min, max, step, onChange }) => (
+}> = ({ label, value, min, max, step, unit, onChange }) => (
   <div style={{
     display: 'grid', gridTemplateColumns: '42% 1fr',
     borderBottom: `1px solid ${C.border}`,
@@ -147,16 +148,23 @@ const SliderRow: React.FC<{
       display: 'flex', alignItems: 'center',
       borderRight: `1px solid ${C.border}`, userSelect: 'none',
     }}>{label}</div>
-    <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+    <div style={{ padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
       <input
         type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(Number(e.target.value))}
         style={{ flex: 1, accentColor: C.accent, cursor: 'pointer' }}
       />
       <span style={{
-        fontSize: 10, color: C.blue, minWidth: 32, textAlign: 'right',
+        fontSize: 10, color: C.blue, minWidth: 28, textAlign: 'right',
         fontFamily: '"Consolas","Menlo",monospace', flexShrink: 0,
-      }}>{value.toFixed(2)}</span>
+      }}>{value.toFixed(step < 0.01 ? 3 : step < 0.1 ? 2 : 1)}</span>
+      {unit && (
+        <span style={{
+          fontSize: 9, color: C.dim, flexShrink: 0,
+          fontFamily: '"Segoe UI",system-ui,sans-serif',
+          minWidth: 14,
+        }}>{unit}</span>
+      )}
     </div>
   </div>
 );
@@ -288,6 +296,7 @@ export const SettingsPanelContent: React.FC = () => {
   const vm       = useAppStore(s => s.viewportManager);
 
   // Section open states
+  const [unitsOpen,     setUnitsOpen]     = useState(true);
   const [viewportOpen,  setViewportOpen]  = useState(true);
   const [rendererOpen,  setRendererOpen]  = useState(true);
   const [transformOpen, setTransformOpen] = useState(true);
@@ -297,6 +306,12 @@ export const SettingsPanelContent: React.FC = () => {
   const [renderOpen,    setRenderOpen]    = useState(true);
   const [hdriOpen,      setHdriOpen]      = useState(true);
   const [splatOpen,     setSplatOpen]     = useState(true);
+
+  // Scene unit abbreviation used throughout sliders
+  const unitAbbr: Record<string, string> = {
+    meters: 'm', centimeters: 'cm', millimeters: 'mm', feet: 'ft', inches: 'in',
+  };
+  const su = unitAbbr[vs.sceneUnits] ?? 'm';
 
   const setShading = (m: ShadingModeType) => {
     updateVS({ shadingMode: m });
@@ -380,6 +395,31 @@ export const SettingsPanelContent: React.FC = () => {
       display: 'flex', flexDirection: 'column',
       background: C.bg, overflowY: 'auto', overflowX: 'hidden',
     }}>
+      {/* ── UNITS ──────────────────────────────────────────── */}
+      <Sec title="Units" tag="scene" open={unitsOpen} onToggle={() => setUnitsOpen(v => !v)} accent />
+      {unitsOpen && (
+        <>
+          <RadioRow
+            label="Working Units"
+            options={[
+              { label: 'm',  value: 'meters'      },
+              { label: 'cm', value: 'centimeters' },
+              { label: 'mm', value: 'millimeters' },
+              { label: 'ft', value: 'feet'        },
+              { label: 'in', value: 'inches'      },
+            ]}
+            value={vs.sceneUnits}
+            onChange={v => updateVS({ sceneUnits: v as ViewportSettings['sceneUnits'] })}
+          />
+          <div style={{
+            padding: '4px 10px 5px', fontSize: 9.5,
+            fontFamily: '"Segoe UI",system-ui,sans-serif',
+            color: C.dim, borderBottom: `1px solid ${C.border}`, lineHeight: 1.5,
+          }}>
+            Sets the unit label shown throughout the UI. All internal values are stored in scene units.
+          </div>
+        </>
+      )}
       {/* ── RENDERER ────────────────────────────────────────────── */}
       <Sec title="Renderer" tag="backend" open={rendererOpen} onToggle={() => setRendererOpen(v => !v)} accent />
       {rendererOpen && (
@@ -464,7 +504,7 @@ export const SettingsPanelContent: React.FC = () => {
             value={vs.transformSpace}
             onChange={v => setSpace(v as 'world' | 'local')}
           />
-          <SliderRow label="Gizmo Size" value={vs.gizmoSize} min={0.1} max={5} step={0.05} onChange={setGizmo} />
+          <SliderRow label="Gizmo Size" value={vs.gizmoSize} min={0.1} max={5} step={0.05} unit={su} onChange={setGizmo} />
         </>
       )}
 
@@ -491,6 +531,7 @@ export const SettingsPanelContent: React.FC = () => {
                 label="Outline Width"
                 value={vs.outlineWidth}
                 min={0.5} max={8} step={0.25}
+                unit="px"
                 onChange={setOutlineWidth}
               />
             </>
@@ -504,9 +545,10 @@ export const SettingsPanelContent: React.FC = () => {
         <>
           <ToggleRow label="Enable Anaglyph" checked={vs.anaglyphEnabled} onChange={toggleAnaglyph} />
           <SliderRow
-            label="IPD (mm)"
+            label="IPD"
             value={Math.round(vs.anaglyphIPD * 1000)}
             min={40} max={100} step={1}
+            unit="mm"
             onChange={v => setIPD(v / 1000)}
           />
         </>
@@ -579,6 +621,7 @@ export const SettingsPanelContent: React.FC = () => {
             label="Light Intensity"
             value={vs.hdriIntensity}
             min={0} max={5} step={0.05}
+            unit="×"
             onChange={setHdriInt}
           />
           <ToggleRow label="Show as BG"      checked={vs.hdriAsBackground}  onChange={toggleHdriBg} />
@@ -587,13 +630,15 @@ export const SettingsPanelContent: React.FC = () => {
               label="BG Intensity"
               value={vs.hdriBgIntensity}
               min={0} max={5} step={0.05}
+              unit="×"
               onChange={setHdriBgInt}
             />
           )}
           <SliderRow
-            label="Rotation (°)"
+            label="Rotation"
             value={vs.hdriRotation}
             min={-180} max={180} step={1}
+            unit="°"
             onChange={setHdriRot}
           />
 
@@ -658,12 +703,14 @@ export const SettingsPanelContent: React.FC = () => {
             label="Alpha Threshold"
             value={vs.splatOpt.alphaThreshold}
             min={0} max={0.1} step={0.002}
+            unit="α"
             onChange={v => updateSplatOpt({ alphaThreshold: v })}
           />
           <SliderRow
             label="LOD (screen px)"
             value={vs.splatOpt.lodFactor}
             min={0.05} max={1.0} step={0.05}
+            unit="px"
             onChange={v => updateSplatOpt({ lodFactor: v })}
           />
           <ToggleRow

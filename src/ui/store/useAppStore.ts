@@ -51,6 +51,8 @@ export interface ViewportSettings {
   hdriRotation: number;           // degrees, Y-axis
   hdriAsBackground: boolean;
   hdriFileName: string;           // display name of the loaded file (empty = none)
+  /** Working unit system for the scene (cosmetic — affects UI display labels). */
+  sceneUnits: 'meters' | 'centimeters' | 'millimeters' | 'feet' | 'inches';
 }
 
 export type { SplatOptSettings };
@@ -79,6 +81,7 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   hdriRotation: 0,
   hdriAsBackground: false,
   hdriFileName: '',
+  sceneUnits: 'meters',
 };
 
 interface AppState {
