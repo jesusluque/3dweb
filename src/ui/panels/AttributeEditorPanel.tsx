@@ -297,12 +297,17 @@ const LightSection: React.FC<{ node: LightNode; onChange: () => void }> = ({ nod
   const [open, setOpen] = useState(true);
   const [color,     setColor]     = useState(node.color.getValue());
   const [intensity, setIntensity] = useState(node.intensity.getValue());
+  const [coneAngle, setConeAngle] = useState(node.coneAngle.getValue());
+  const [penumbra,  setPenumbra]  = useState(node.penumbra.getValue());
+  const isSpot = node.lightType.getValue() === 'spot';
 
   // Poll in case values change elsewhere
   useEffect(() => {
     const id = setInterval(() => {
       setColor(node.color.getValue());
       setIntensity(node.intensity.getValue());
+      setConeAngle(node.coneAngle.getValue());
+      setPenumbra(node.penumbra.getValue());
     }, 100);
     return () => clearInterval(id);
   }, [node]);
@@ -353,6 +358,36 @@ const LightSection: React.FC<{ node: LightNode; onChange: () => void }> = ({ nod
               }
             }}
           />
+
+          {/* Spot-only: cone angle + penumbra */}
+          {isSpot && (
+            <>
+              <CRow
+                label="Cone Angle (°)"
+                value={+coneAngle.toFixed(1)}
+                onChange={raw => {
+                  const n = parseFloat(raw);
+                  if (!isNaN(n)) {
+                    setConeAngle(n);
+                    node.coneAngle.setValue(Math.max(1, Math.min(89, n)));
+                    onChange();
+                  }
+                }}
+              />
+              <CRow
+                label="Penumbra"
+                value={+penumbra.toFixed(3)}
+                onChange={raw => {
+                  const n = parseFloat(raw);
+                  if (!isNaN(n)) {
+                    setPenumbra(n);
+                    node.penumbra.setValue(Math.max(0, Math.min(1, n)));
+                    onChange();
+                  }
+                }}
+              />
+            </>
+          )}
         </>
       )}
     </>

@@ -118,6 +118,12 @@ export class ViewportManager {
   /** Per-CameraNode helper state for frustum display. */
   private cameraHelperMap: Map<string, { helperCam: THREE.PerspectiveCamera; helper: THREE.CameraHelper }> = new Map();
 
+  /** SpotLight UUID → custom cone gizmo group (parented to the light's obj group). */
+  private _spotConeMap: Map<string, THREE.Group> = new Map();
+
+  /** DirectionalLight UUID → custom arrow gizmo group (parented to the light's obj group). */
+  private _dirArrowMap: Map<string, THREE.Group> = new Map();
+
   // ── HDRI environment lighting ─────────────────────────────────────────────
   /** The PMREM-processed environment map currently applied to the scene. */
   private _hdriEnvMap: THREE.Texture | null = null;
@@ -597,6 +603,9 @@ export class ViewportManager {
     for (const [, entry] of this.lightHelperMap) {
       if (entry.helper) entry.helper.visible = v;
     }
+    // Parented spot cone and directional arrow gizmos
+    for (const [, cone] of this._spotConeMap) cone.visible = v;
+    for (const [, arrow] of this._dirArrowMap)  arrow.visible = v;
 
     // Crop gizmo + crop box helpers
     if (!v && this._cropGizmoActive) {
@@ -949,14 +958,20 @@ export class ViewportManager {
         node.intensity.onDirty = refreshAmbient;
       } else if (type === 'spot') {
         const sl = new THREE.SpotLight(colorHex, intensity);
-        sl.angle = Math.PI / 6;
-        sceneHelper = new THREE.SpotLightHelper(sl);
+        sl.position.set(0, 0, 0);  // SpotLight constructor self-positions at (0,1,0) — reset
+        sl.angle    = THREE.MathUtils.degToRad(node.coneAngle.getValue());
+        sl.penumbra = node.penumbra.getValue();
+        // target parented in -Z so cone direction follows group rotation (no external target)
+        sl.target.position.set(0, 0, -1);
         light = sl;
+        // sceneHelper stays null — we use a custom parented cone gizmo instead
       } else {
         // directional (default)
         const dl = new THREE.DirectionalLight(colorHex, intensity);
-        sceneHelper = new THREE.DirectionalLightHelper(dl, 0.8);
+        dl.position.set(0, 0, 0);  // DirectionalLight constructor self-positions at (0,1,0) — reset
+        dl.target.position.set(0, 0, -1); // target will be added to obj so rotation steers direction
         light = dl;
+        // sceneHelper stays null — custom parented arrow gizmo used instead
       }
 
       if (sceneHelper) this.scene.add(sceneHelper);
@@ -971,8 +986,29 @@ export class ViewportManager {
           new THREE.MeshBasicMaterial({ color: colorHex }),
         );
 
-      obj = new THREE.Group();
+        obj = new THREE.Group();
         obj.add(light, indicator);
+
+        if (type === 'spot') {
+          // Target must be a scene-graph descendant to get a valid matrixWorld
+          obj.add((light as THREE.SpotLight).target);
+          // Custom cone gizmo — parented to obj so transforms are automatic
+          const coneGizmo = this._buildSpotConeGizmo(
+            node.coneAngle.getValue(), node.penumbra.getValue(),
+            new THREE.Color(colorHex).getHex(),
+          );
+          obj.add(coneGizmo);
+          this._spotConeMap.set(node.uuid, coneGizmo);
+        }
+
+        if (type === 'directional') {
+          // Target in group so rotation drives direction
+          obj.add((light as THREE.DirectionalLight).target);
+          // Custom arrow gizmo — parented to obj
+          const arrowGizmo = this._buildDirectionalGizmo(new THREE.Color(colorHex).getHex());
+          obj.add(arrowGizmo);
+          this._dirArrowMap.set(node.uuid, arrowGizmo);
+        }
 
         // Track for setLightingEnabled / removeNodeFromView
         this.lightHelperMap.set(node.uuid, { light, helper: sceneHelper });
@@ -984,10 +1020,47 @@ export class ViewportManager {
           (light as any).color?.set(c);
           light.intensity = node.intensity.getValue();
           (indicator.material as THREE.MeshBasicMaterial).color.set(c);
+          if (type === 'spot') {
+            const sl = light as THREE.SpotLight;
+            sl.angle    = THREE.MathUtils.degToRad(node.coneAngle.getValue());
+            sl.penumbra = node.penumbra.getValue();
+            // Rebuild custom cone gizmo with new angles
+            const oldCone = this._spotConeMap.get(node.uuid);
+            if (oldCone) {
+              obj!.remove(oldCone);
+              oldCone.traverse(child => {
+                if ((child as THREE.LineSegments).geometry) (child as THREE.LineSegments).geometry.dispose();
+              });
+            }
+            const newCone = this._buildSpotConeGizmo(
+              node.coneAngle.getValue(), node.penumbra.getValue(),
+              new THREE.Color(c).getHex(),
+            );
+            obj!.add(newCone);
+            this._spotConeMap.set(node.uuid, newCone);
+          }
+          if (type === 'directional') {
+            // Rebuild directional arrow with new color
+            const oldArrow = this._dirArrowMap.get(node.uuid);
+            if (oldArrow) {
+              obj!.remove(oldArrow);
+              oldArrow.traverse(child => {
+                if ((child as THREE.LineSegments).geometry) (child as THREE.LineSegments).geometry.dispose();
+                if ((child as THREE.LineSegments).material) ((child as THREE.LineSegments).material as THREE.Material).dispose();
+              });
+            }
+            const newArrow = this._buildDirectionalGizmo(new THREE.Color(c).getHex());
+            obj!.add(newArrow);
+            this._dirArrowMap.set(node.uuid, newArrow);
+          }
           (sceneHelper as any)?.update?.();
         };
         node.color.onDirty     = refreshLight;
         node.intensity.onDirty = refreshLight;
+        if (type === 'spot') {
+          node.coneAngle.onDirty = refreshLight;
+          node.penumbra.onDirty  = refreshLight;
+        }
       }
 
     } else if (node instanceof GltfNode) {
@@ -1209,6 +1282,11 @@ export class ViewportManager {
 
     for (const [, ch] of this.cameraHelperMap) {
       if (ch.helper.visible) ch.helper.update();
+    }
+
+    // Refresh directional / point light scene-level helpers each frame
+    for (const [, entry] of this.lightHelperMap) {
+      if (entry.helper && (entry.helper as any).update) (entry.helper as any).update();
     }
 
     // ── Crop gizmo: constant-size handles + hover ───────────────────────────
@@ -1622,6 +1700,24 @@ export class ViewportManager {
       if (idx !== -1) this.lights.splice(idx, 1);
       this.lightHelperMap.delete(uuid);
     }
+    // Dispose spot cone gizmo geometries (the Group itself is removed with its parent obj)
+    const spotCone = this._spotConeMap.get(uuid);
+    if (spotCone) {
+      spotCone.traverse(child => {
+        if ((child as THREE.LineSegments).geometry) (child as THREE.LineSegments).geometry.dispose();
+        if ((child as THREE.LineSegments).material) ((child as THREE.LineSegments).material as THREE.Material).dispose();
+      });
+      this._spotConeMap.delete(uuid);
+    }
+    // Dispose directional arrow gizmo geometries
+    const dirArrow = this._dirArrowMap.get(uuid);
+    if (dirArrow) {
+      dirArrow.traverse(child => {
+        if ((child as THREE.LineSegments).geometry) (child as THREE.LineSegments).geometry.dispose();
+        if ((child as THREE.LineSegments).material) ((child as THREE.LineSegments).material as THREE.Material).dispose();
+      });
+      this._dirArrowMap.delete(uuid);
+    }
     // Clean up native SplatMesh
     const splatMesh = this._splatMeshMap.get(uuid);
     if (splatMesh) {
@@ -1644,6 +1740,105 @@ export class ViewportManager {
    * Recompute a CameraNode's frustum helper from its current plugs + render resolution.
    * Called whenever filmback / clip plugs change or render resolution is updated.
    */
+  // ── SpotLight custom cone gizmo ───────────────────────────────────────────
+  /**
+   * Build a wireframe cone gizmo for a spotlight.
+   * Apex at group origin, opens along local -Z, two rings: inner (hard edge)
+   * + outer (penumbra, dimmed). Fully parented — no per-frame update needed.
+   */
+  private _buildSpotConeGizmo(coneAngleDeg: number, penumbra: number, color: number): THREE.Group {
+    const CONE_LEN  = 2.0;   // world-unit cone depth
+    const SEGMENTS  = 32;    // circle resolution
+    const RAY_COUNT = 8;     // apex-to-rim rays
+
+    const outerAngle = THREE.MathUtils.degToRad(Math.max(1, Math.min(89, coneAngleDeg)));
+    const innerAngle = outerAngle * Math.max(0, 1 - penumbra);
+
+    const buildPositions = (halfAngle: number): Float32Array => {
+      const r   = CONE_LEN * Math.tan(halfAngle);
+      const pts: number[] = [];
+      // Circle at base (z = -CONE_LEN)
+      for (let i = 0; i < SEGMENTS; i++) {
+        const a0 = (i / SEGMENTS) * Math.PI * 2;
+        const a1 = ((i + 1) / SEGMENTS) * Math.PI * 2;
+        pts.push(Math.cos(a0) * r, Math.sin(a0) * r, -CONE_LEN);
+        pts.push(Math.cos(a1) * r, Math.sin(a1) * r, -CONE_LEN);
+      }
+      // Apex rays
+      for (let i = 0; i < RAY_COUNT; i++) {
+        const a = (i / RAY_COUNT) * Math.PI * 2;
+        pts.push(0, 0, 0);
+        pts.push(Math.cos(a) * r, Math.sin(a) * r, -CONE_LEN);
+      }
+      return new Float32Array(pts);
+    };
+
+    const group = new THREE.Group();
+
+    // Inner cone — full opacity (hard-edge boundary)
+    const innerGeo = new THREE.BufferGeometry();
+    innerGeo.setAttribute('position', new THREE.BufferAttribute(buildPositions(innerAngle), 3));
+    group.add(new THREE.LineSegments(innerGeo, new THREE.LineBasicMaterial({ color })));
+
+    // Outer penumbra cone — drawn only when penumbra > 0
+    if (penumbra > 0.005) {
+      const outerGeo = new THREE.BufferGeometry();
+      outerGeo.setAttribute('position', new THREE.BufferAttribute(buildPositions(outerAngle), 3));
+      group.add(new THREE.LineSegments(outerGeo, new THREE.LineBasicMaterial({
+        color, transparent: true, opacity: 0.35,
+      })));
+    }
+
+    return group;
+  }
+
+  // ── DirectionalLight custom arrow gizmo ──────────────────────────────────
+  /**
+   * Build a sun-disc + parallel-arrows gizmo for a directional light.
+   * A circle (source face) in the XY plane at z=0, with RAY_COUNT parallel
+   * arrows shooting along local -Z. Fully parented — moves/rotates with the node.
+   */
+  private _buildDirectionalGizmo(color: number): THREE.Group {
+    const DISC_R   = 0.30;   // source disc radius
+    const RAY_OFF  = 0.32;   // ray spacing (circle radius for ray origins)
+    const RAY_LEN  = 1.20;   // how far the arrows extend in -Z
+    const HEAD_LEN = 0.10;   // arrowhead arm length
+    const HEAD_ANG = 0.42;   // arrowhead half-angle (radians, ~24°)
+    const DISC_SEG = 24;
+    const RAY_COUNT = 8;
+
+    const pts: number[] = [];
+
+    // Source disc (circle at z = 0 in XY plane)
+    for (let i = 0; i < DISC_SEG; i++) {
+      const a0 = (i / DISC_SEG) * Math.PI * 2;
+      const a1 = ((i + 1) / DISC_SEG) * Math.PI * 2;
+      pts.push(Math.cos(a0) * DISC_R, Math.sin(a0) * DISC_R, 0);
+      pts.push(Math.cos(a1) * DISC_R, Math.sin(a1) * DISC_R, 0);
+    }
+
+    // Center ray + 8 perimeter rays, all parallel in -Z
+    const rayAngles = [null, ...Array.from({ length: RAY_COUNT }, (_, i) => (i / RAY_COUNT) * Math.PI * 2)];
+    for (const angle of rayAngles) {
+      const rx = angle === null ? 0 : Math.cos(angle) * RAY_OFF;
+      const ry = angle === null ? 0 : Math.sin(angle) * RAY_OFF;
+      // Shaft
+      pts.push(rx, ry, 0, rx, ry, -RAY_LEN);
+      // Arrowhead — two arms opening toward +Z from tip
+      const tipZ = -RAY_LEN;
+      pts.push(rx, ry, tipZ);
+      pts.push(rx + Math.cos(HEAD_ANG) * HEAD_LEN, ry + Math.sin(HEAD_ANG) * HEAD_LEN, tipZ + HEAD_LEN);
+      pts.push(rx, ry, tipZ);
+      pts.push(rx - Math.cos(HEAD_ANG) * HEAD_LEN, ry + Math.sin(HEAD_ANG) * HEAD_LEN, tipZ + HEAD_LEN);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+    const group = new THREE.Group();
+    group.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color })));
+    return group;
+  }
+
   private refreshCameraHelper(node: CameraNode): void {
     const entry = this.cameraHelperMap.get(node.uuid);
     if (!entry) return;

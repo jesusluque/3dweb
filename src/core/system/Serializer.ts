@@ -127,6 +127,8 @@ export class Serializer {
         if (s.attributes.lightType != null)  (node as LightNode).lightType.setValue(s.attributes.lightType);
         if (s.attributes.color != null)      (node as LightNode).color.setValue(s.attributes.color);
         if (s.attributes.intensity != null)  (node as LightNode).intensity.setValue(s.attributes.intensity);
+        if (s.attributes.coneAngle != null)  (node as LightNode).coneAngle.setValue(s.attributes.coneAngle);
+        if (s.attributes.penumbra != null)   (node as LightNode).penumbra.setValue(s.attributes.penumbra);
       } else if (s.type === 'GltfNode') {
         const gn = new GltfNode(s.name);
         (gn as any).uuid = s.uuid;
