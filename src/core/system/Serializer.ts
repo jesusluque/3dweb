@@ -44,6 +44,8 @@ export class Serializer {
     const walk = (node: DAGNode) => {
       if (visited.has(node.uuid)) return;
       visited.add(node.uuid);
+      // Runtime-only nodes (e.g. coverage heatmap) must not be persisted.
+      if (node.nodeType === 'CoverageHeatmapNode') return;
       if (node.uuid !== rootUuid) {
         const attributes: Record<string, any> = {};
         for (const [key, plug] of node.plugs.entries()) {

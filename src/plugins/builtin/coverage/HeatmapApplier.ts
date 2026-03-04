@@ -109,6 +109,8 @@ export type { CameraFrustum };
 interface ApplyArgs {
   cameraCenters: CameraFrustum[];
   scene:         THREE.Scene;
+  /** When set, the Points object is parented here instead of scene root. */
+  parent?:       THREE.Object3D;
   density:       number;
   pointSizeMult: number;
   opacity:       number;
@@ -117,8 +119,9 @@ interface ApplyArgs {
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export class HeatmapApplier {
-  private _points:   THREE.Points | null = null;
-  private _scene:    THREE.Scene  | null = null;
+  private _points:   THREE.Points      | null = null;
+  private _scene:    THREE.Scene       | null = null;
+  private _parent:   THREE.Object3D    | null = null; // group that owns _points
   private _active    = false;
   private _lastArgs: ApplyArgs | null = null;
 
@@ -130,8 +133,9 @@ export class HeatmapApplier {
     density       = 4,
     pointSizeMult = 1.0,
     opacity       = 0.9,
+    parent?:       THREE.Object3D,
   ): void {
-    this._lastArgs = { cameraCenters, scene, density, pointSizeMult, opacity };
+    this._lastArgs = { cameraCenters, scene, parent, density, pointSizeMult, opacity };
     this._rebuild(this._lastArgs);
   }
 
@@ -162,12 +166,13 @@ export class HeatmapApplier {
   /** Remove overlay. */
   clear(): void {
     if (this._points) {
-      this._scene?.remove(this._points);
+      (this._parent ?? this._scene)?.remove(this._points);
       this._points.geometry.dispose();
       (this._points.material as THREE.Material).dispose();
       this._points = null;
     }
     this._scene    = null;
+    this._parent   = null;
     this._active   = false;
     this._lastArgs = null;
   }
@@ -177,16 +182,17 @@ export class HeatmapApplier {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   private _rebuild(args: ApplyArgs): void {
-    const { cameraCenters, scene, density, pointSizeMult, opacity } = args;
+    const { cameraCenters, scene, parent, density, pointSizeMult, opacity } = args;
 
     // Remove old Points
     if (this._points) {
-      this._scene?.remove(this._points);
+      (this._parent ?? this._scene)?.remove(this._points);
       this._points.geometry.dispose();
       (this._points.material as THREE.Material).dispose();
       this._points = null;
     }
     this._scene  = scene;
+    this._parent = parent ?? null;
     this._active = false;
 
     const nCams = cameraCenters.length;
@@ -422,7 +428,10 @@ export class HeatmapApplier {
 
     this._points = new THREE.Points(ptGeo, ptMat);
     this._points.renderOrder = 999;
-    scene.add(this._points);
+    // If a parent group is provided (the node's viewport object), add the
+    // Points there so that DAG-level transforms (translate/rotate/scale)
+    // move the entire heatmap.  Otherwise fall back to scene root.
+    (this._parent ?? scene).add(this._points);
 
     this._active = true;
   }

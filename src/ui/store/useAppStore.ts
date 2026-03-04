@@ -53,6 +53,24 @@ export interface ViewportSettings {
   hdriFileName: string;           // display name of the loaded file (empty = none)
   /** Working unit system for the scene (cosmetic — affects UI display labels). */
   sceneUnits: 'meters' | 'centimeters' | 'millimeters' | 'feet' | 'inches';
+  /**
+   * All applied coverage heatmaps.  Each entry stores enough data to fully
+   * restore the overlay after a scene load without re-running the analysis.
+   * The array is saved inside `viewportSettings` in the scene JSON file.
+   */
+  coverageHeatmaps: Array<{
+    nodeUuid:     string;   // CoverageHeatmapNode UUID — used to reconnect without recreating
+    name:         string;   // e.g. "Coverage Heatmap 2"
+    cameraCenters: any[];   // CameraFrustum[] — typed loosely to avoid plugin dep
+    density:      number;
+    pointSize:    number;
+    opacity:      number;
+    translate:    { x: number; y: number; z: number };
+    rotate:       { x: number; y: number; z: number };
+    scale:        { x: number; y: number; z: number };
+  }>;
+  /** Monotonically increasing counter — used to give each heatmap a unique number. */
+  heatmapCounter: number;
 }
 
 export type { SplatOptSettings };
@@ -82,6 +100,8 @@ const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
   hdriAsBackground: false,
   hdriFileName: '',
   sceneUnits: 'meters',
+  coverageHeatmaps: [],
+  heatmapCounter: 0,
 };
 
 interface AppState {

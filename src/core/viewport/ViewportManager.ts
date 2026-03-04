@@ -1671,6 +1671,11 @@ export class ViewportManager {
     }
   }
 
+  /** Returns the Three.js Object3D registered for a DAG node, if any. */
+  public getNodeObject(uuid: string): THREE.Object3D | undefined {
+    return this.nodeMap.get(uuid);
+  }
+
   public removeNodeFromView(uuid: string) {
     const obj = this.nodeMap.get(uuid);
     if (!obj) return;

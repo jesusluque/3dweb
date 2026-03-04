@@ -25,7 +25,14 @@ import type {
   PerCameraResult,
   PerPairResult,
   PerTriangleResult,
+  CameraFrustum,
 } from './CoverageResults';
+
+// ── Module-level singleton map ─────────────────────────────────────────────────────────────
+// HeatmapApplier instances keyed by CoverageHeatmapNode UUID.
+// Living outside React means they survive when the panel window is closed
+// and can be reconnected when it is reopened, without re-running the analysis.
+const _appliers = new Map<string, HeatmapApplier>();
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -307,15 +314,20 @@ const PairsTab: React.FC<{ pairs: PerPairResult[] }> = ({ pairs }) => (
 interface CoverageMapTabProps {
   result: CoverageGlobalResult;
   heatmapActive: boolean;
+  mapCount: number;       // total frozen maps already in scene
   onToggleHeatmap: () => void;
 }
 
 const CoverageMapTab: React.FC<CoverageMapTabProps> = ({
-  result, heatmapActive, onToggleHeatmap,
+  result, heatmapActive, mapCount, onToggleHeatmap,
 }) => {
   const poorFrac   = result.perTriangle.filter(t => t.coverageScore < 0.4).length / result.totalTriangleCount;
   const medFrac    = result.perTriangle.filter(t => t.coverageScore >= 0.4 && t.coverageScore < 0.7).length / result.totalTriangleCount;
   const goodFrac   = result.perTriangle.filter(t => t.coverageScore >= 0.7).length / result.totalTriangleCount;
+
+  const applyLabel = mapCount > 0
+    ? `Apply as Coverage Map ${mapCount + 1}`
+    : 'Apply Coverage Map to Viewport';
 
   return (
     <div style={ss.scrollBody}>
@@ -332,8 +344,14 @@ const CoverageMapTab: React.FC<CoverageMapTabProps> = ({
 
       {/* Heatmap toggle */}
       <button style={ss.btn(heatmapActive)} onClick={onToggleHeatmap}>
-        {heatmapActive ? 'Clear Heatmap' : 'Apply Heatmap to Viewport'}
+        {heatmapActive ? 'Clear This Coverage Map' : applyLabel}
       </button>
+
+      {mapCount > 0 && !heatmapActive && (
+        <div style={{ marginTop: 6, color: 'var(--maya-text-dim,#888)', fontSize: 11 }}>
+          {mapCount} frozen map{mapCount !== 1 ? 's' : ''} already in scene.
+        </div>
+      )}
 
       <div style={{ marginTop: 10, color: 'var(--maya-text-dim,#888)', fontSize: 11 }}>
         Quality score = 0.30·views + 0.35·triangulation + 0.25·incidence + 0.10·density<br />
@@ -346,8 +364,11 @@ const CoverageMapTab: React.FC<CoverageMapTabProps> = ({
 // ── Main panel ────────────────────────────────────────────────────────────────
 
 export const CoveragePanel: React.FC = () => {
-  const core            = useAppStore(s => s.core);
-  const vm              = useAppStore(s => s.viewportManager);  const markSceneDirty   = useAppStore(s => s.markSceneDirty);  const vs              = useAppStore(s => s.viewportSettings);
+  const core                   = useAppStore(s => s.core);
+  const vm                     = useAppStore(s => s.viewportManager);
+  const markSceneDirty         = useAppStore(s => s.markSceneDirty);
+  const vs                     = useAppStore(s => s.viewportSettings);
+  const updateViewportSettings = useAppStore(s => s.updateViewportSettings);
 
   const [config, setConfig]       = useState<CoverageConfig>({ ...DEFAULT_COVERAGE_CONFIG });
   const [running, setRunning]     = useState(false);
@@ -355,11 +376,13 @@ export const CoveragePanel: React.FC = () => {
   const [result, setResult]       = useState<CoverageGlobalResult | null>(null);
   const [error, setError]         = useState<string | null>(null);
   const [tab, setTab]             = useState<'summary'|'cameras'|'pairs'|'map'>('summary');
-  const [heatmapActive, setHeatmap] = useState(false);
+  // UUID of the heatmap node currently managed by this panel instance.
+  // A panel can only "own" one node at a time (the one from the latest result).
+  const [activeHeatmapUuid, setActiveHeatmapUuid] = useState<string | null>(null);
 
   const engineRef      = useRef<VisibilityEngine | null>(null);
-  const heatmapRef     = useRef<HeatmapApplier>(new HeatmapApplier());
   const resultRef      = useRef<CoverageGlobalResult | null>(null);
+  // Ref to the DAGNode for the currently active heatmap
   const heatmapNodeRef = useRef<CoverageHeatmapNode | null>(null);
 
   const patchConfig = useCallback((patch: Partial<CoverageConfig>) => {
@@ -372,14 +395,10 @@ export const CoveragePanel: React.FC = () => {
     setError(null);
     setProgress({ fraction: 0, message: 'Starting…' });
 
-    // Clear old heatmap + node
-    heatmapRef.current.clear();
-    if (heatmapNodeRef.current && core) {
-      core.sceneGraph.removeNode(heatmapNodeRef.current);
-      heatmapNodeRef.current = null;
-      markSceneDirty();
-    }
-    setHeatmap(false);
+    // Detach from the previous result's heatmap without destroying it.
+    // The old node stays frozen in the scene as "Coverage Heatmap N".
+    setActiveHeatmapUuid(null);
+    heatmapNodeRef.current = null;
 
     const engine = new VisibilityEngine(core, vm, (p) => setProgress(p));
     engineRef.current = engine;
@@ -404,85 +423,277 @@ export const CoveragePanel: React.FC = () => {
     setProgress(null);
   }, []);
 
+  // Reset panel's active-map state when coverageHeatmaps is cleared
+  // (e.g. after File > New or File > Open which wipes viewport settings).
+  useEffect(() => {
+    const maps = vs.coverageHeatmaps ?? [];
+    if (maps.length === 0) {
+      // Prune stale module-level appliers too (Three.js objects already gone)
+      _appliers.clear();
+      setActiveHeatmapUuid(null);
+      heatmapNodeRef.current = null;
+    }
+  }, [vs.coverageHeatmaps]);
+
+  // ── Internal helper: create + register a new heatmap ───────────────────
+  /**
+   * Creates a new CoverageHeatmapNode with a consecutive name, builds the
+   * THREE.Points cloud, registers it in the module-level `_appliers` map and
+   * appends an entry to the persisted `coverageHeatmaps` array.
+   */
+  const _applyHeatmap = useCallback((
+    cameraCenters: CameraFrustum[],
+    density: number,
+    pointSizeMult: number,
+    opacity: number,
+    existingUuid?: string,   // set when reconnecting to an already-live node
+  ) => {
+    if (!vm || !core) return;
+    const scene: THREE.Scene | undefined = (vm as any).scene;
+    if (!scene) return;
+
+    // Prune stale applier entries (e.g. after scene clear)
+    for (const [uuid] of _appliers) {
+      if (!core.sceneGraph.getNodeById(uuid)) _appliers.delete(uuid);
+    }
+
+    if (existingUuid && _appliers.has(existingUuid)) {
+      // ── Reconnect to an already-live node (panel was closed and reopened) ──
+      const hmNode = core.sceneGraph.getNodeById(existingUuid) as CoverageHeatmapNode | undefined;
+      if (hmNode) {
+        heatmapNodeRef.current = hmNode;
+        setActiveHeatmapUuid(existingUuid);
+        return;
+      }
+    }
+
+    // ── Create a brand-new node ─────────────────────────────────────────────────────
+    const counter  = (useAppStore.getState().viewportSettings.heatmapCounter ?? 0) + 1;
+    const mapName  = `Coverage Heatmap ${counter}`;
+    const hmNode   = new CoverageHeatmapNode();
+    hmNode.name    = mapName;
+    hmNode.density.setValue(density);
+    hmNode.pointSize.setValue(pointSizeMult);
+    hmNode.opacity.setValue(opacity);
+
+    core.sceneGraph.addNode(hmNode);
+    vm.addNodeToView(hmNode);
+    const group = vm.getNodeObject(hmNode.uuid);
+    heatmapNodeRef.current = hmNode;
+
+    const applier = new HeatmapApplier();
+    applier.apply(cameraCenters, scene, density, pointSizeMult, opacity, group);
+    _appliers.set(hmNode.uuid, applier);
+
+    // Persist snapshot entry (includes current transform — identity at creation time)
+    const currentMaps = useAppStore.getState().viewportSettings.coverageHeatmaps ?? [];
+    updateViewportSettings({
+      heatmapCounter: counter,
+      coverageHeatmaps: [
+        ...currentMaps,
+        {
+          nodeUuid:      hmNode.uuid,
+          name:          mapName,
+          cameraCenters,
+          density,
+          pointSize: pointSizeMult,
+          opacity,
+          translate: { ...hmNode.translate.getValue() },
+          rotate:    { ...hmNode.rotate.getValue() },
+          scale:     { ...hmNode.scale.getValue() },
+        },
+      ],
+    });
+
+    setActiveHeatmapUuid(hmNode.uuid);
+    markSceneDirty();
+  }, [vm, core, markSceneDirty, updateViewportSettings]);
+
+  // ── Restore a single heatmap entry from saved data (replaces the uuid in the store) ──
+  // Used during mount-restore. Does NOT append a new entry (unlike _applyHeatmap),
+  // it REPLACES the existing entry's nodeUuid with the newly created node's uuid.
+  const _restoreHeatmapFromEntry = useCallback((entry: {
+    nodeUuid: string; name: string;
+    cameraCenters: CameraFrustum[];
+    density: number; pointSize: number; opacity: number;
+  }) => {
+    if (!vm || !core) return;
+    const scene: THREE.Scene | undefined = (vm as any).scene;
+    if (!scene) return;
+
+    const hmNode = new CoverageHeatmapNode();
+    hmNode.name = entry.name;
+    hmNode.density.setValue(entry.density);
+    hmNode.pointSize.setValue(entry.pointSize);
+    hmNode.opacity.setValue(entry.opacity);
+    if (entry.translate) hmNode.translate.setValue(entry.translate);
+    if (entry.rotate)    hmNode.rotate.setValue(entry.rotate);
+    if (entry.scale)     hmNode.scale.setValue(entry.scale);
+
+    core.sceneGraph.addNode(hmNode);
+    vm.addNodeToView(hmNode);
+    const group = vm.getNodeObject(hmNode.uuid);
+
+    const applier = new HeatmapApplier();
+    applier.apply(entry.cameraCenters, scene, entry.density, entry.pointSize, entry.opacity, group);
+    _appliers.set(hmNode.uuid, applier);
+
+    // Replace the stale uuid with the new one — never append
+    const all = useAppStore.getState().viewportSettings.coverageHeatmaps ?? [];
+    const updated = all.map(e =>
+      e.nodeUuid === entry.nodeUuid ? { ...e, nodeUuid: hmNode.uuid } : e,
+    );
+    updateViewportSettings({ coverageHeatmaps: updated });
+
+    heatmapNodeRef.current = hmNode;
+    setActiveHeatmapUuid(hmNode.uuid);
+  }, [vm, core, updateViewportSettings]);
+
+  // ── Auto-restore heatmaps when panel mounts (or engine becomes available) ──
+  useEffect(() => {
+    if (!vm || !core) return;
+    const maps = useAppStore.getState().viewportSettings.coverageHeatmaps ?? [];
+    if (maps.length === 0) return;
+
+    for (const entry of maps) {
+      if (_appliers.has(entry.nodeUuid)) {
+        // Applier already live (panel was just closed/reopened in same session)
+        // — reconnect the most-recent one as the active node
+        const hmNode = core.sceneGraph.getNodeById(entry.nodeUuid) as CoverageHeatmapNode | undefined;
+        if (hmNode) {
+          heatmapNodeRef.current = hmNode;
+          setActiveHeatmapUuid(entry.nodeUuid);
+        }
+      } else {
+        // Node was lost (scene loaded from file, or page refreshed) — recreate
+        // and REPLACE the existing entry (not append) to prevent duplication.
+        _restoreHeatmapFromEntry(entry);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vm, core]);
+
   const handleToggleHeatmap = useCallback(() => {
     const res = resultRef.current;
-    if (!res || !vm || !core) return;
+    if (!vm || !core) return;
 
-    if (heatmapActive) {
-      // ── Turn off ─────────────────────────────────────────────────────
-      heatmapRef.current.clear();
-      if (heatmapNodeRef.current) {
-        core.sceneGraph.removeNode(heatmapNodeRef.current);
-        heatmapNodeRef.current = null;
-        markSceneDirty();
+    if (activeHeatmapUuid) {
+      // ── Turn off: remove the current result’s heatmap from scene ──
+      const applier = _appliers.get(activeHeatmapUuid);
+      if (applier) {
+        applier.clear();
+        _appliers.delete(activeHeatmapUuid);
       }
-      setHeatmap(false);
-    } else {
-      // ── Turn on ──────────────────────────────────────────────────────
-      const scene: THREE.Scene | undefined = (vm as any).scene;
-      if (!scene) return;
-
-      // Create the heatmap DAG node (visible in Outliner + Attribute Editor)
-      const hmNode = new CoverageHeatmapNode();
-      core.sceneGraph.addNode(hmNode);
-      heatmapNodeRef.current = hmNode;
+      const hmNode = heatmapNodeRef.current;
+      if (hmNode) {
+        vm.removeNodeFromView(hmNode.uuid);
+        core.sceneGraph.removeNode(hmNode);
+        heatmapNodeRef.current = null;
+      }
+      // Remove from persisted array
+      const remaining = (useAppStore.getState().viewportSettings.coverageHeatmaps ?? [])
+        .filter(e => e.nodeUuid !== activeHeatmapUuid);
+      updateViewportSettings({ coverageHeatmaps: remaining });
+      setActiveHeatmapUuid(null);
       markSceneDirty();
-
-      heatmapRef.current.apply(
-        res.cameraCenters,
-        scene,
-        hmNode.density.getValue(),
-        hmNode.pointSize.getValue(),
-        hmNode.opacity.getValue(),
-      );
-      setHeatmap(true);
+    } else {
+      // ── Turn on: apply a new heatmap for the current analysis result ──
+      if (!res) return;
+      _applyHeatmap(res.cameraCenters, 4, 1.0, 0.9);
     }
-  }, [heatmapActive, vm, core, markSceneDirty]);
+  }, [activeHeatmapUuid, vm, core, markSceneDirty, updateViewportSettings, _applyHeatmap]);
 
   // ── Live plug polling — update heatmap when node params change ────────────
   useEffect(() => {
-    if (!heatmapActive) return;
+    if (!activeHeatmapUuid) return;
     const hmNode = heatmapNodeRef.current;
-    if (!hmNode) return;
+    const applier = _appliers.get(activeHeatmapUuid);
+    if (!hmNode || !applier) return;
 
     let prevDensity   = hmNode.density.getValue();
     let prevPointSize = hmNode.pointSize.getValue();
     let prevOpacity   = hmNode.opacity.getValue();
     let densityTimer: ReturnType<typeof setTimeout> | null = null;
+    let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+    const uuid = activeHeatmapUuid;
+
+    const persistSnapshot = () => {
+      if (snapshotTimer) clearTimeout(snapshotTimer);
+      snapshotTimer = setTimeout(() => {
+        const all = useAppStore.getState().viewportSettings.coverageHeatmaps ?? [];
+        const updated = all.map(e =>
+          e.nodeUuid === uuid
+            ? { ...e,
+                density:   hmNode.density.getValue(),
+                pointSize: hmNode.pointSize.getValue(),
+                opacity:   hmNode.opacity.getValue(),
+                translate: { ...hmNode.translate.getValue() },
+                rotate:    { ...hmNode.rotate.getValue() },
+                scale:     { ...hmNode.scale.getValue() },
+              }
+            : e,
+        );
+        useAppStore.getState().updateViewportSettings({ coverageHeatmaps: updated });
+      }, 600);
+    };
+
+    let prevTranslate = { ...hmNode.translate.getValue() };
+    let prevRotate    = { ...hmNode.rotate.getValue() };
+    let prevScale     = { ...hmNode.scale.getValue() };
 
     const id = setInterval(() => {
       const newDensity   = hmNode.density.getValue();
       const newPointSize = hmNode.pointSize.getValue();
       const newOpacity   = hmNode.opacity.getValue();
+      const newT = hmNode.translate.getValue();
+      const newR = hmNode.rotate.getValue();
+      const newSc = hmNode.scale.getValue();
 
-      // pointSize → cheap uniform update
       if (Math.abs(newPointSize - prevPointSize) > 0.001) {
         prevPointSize = newPointSize;
-        heatmapRef.current.updatePointSize(newPointSize);
+        applier.updatePointSize(newPointSize);
+        persistSnapshot();
       }
-      // opacity → cheap uniform update
       if (Math.abs(newOpacity - prevOpacity) > 0.001) {
         prevOpacity = newOpacity;
-        heatmapRef.current.updateOpacity(newOpacity);
+        applier.updateOpacity(newOpacity);
+        persistSnapshot();
       }
-      // density → expensive rebuild, debounced 400 ms
       if (Math.abs(newDensity - prevDensity) > 0.05) {
         prevDensity = newDensity;
         if (densityTimer) clearTimeout(densityTimer);
-        densityTimer = setTimeout(() => {
-          heatmapRef.current.updateDensity(newDensity);
-        }, 400);
+        densityTimer = setTimeout(() => applier.updateDensity(newDensity), 400);
+        persistSnapshot();
+      }
+      // Persist transform changes
+      if (
+        Math.abs(newT.x - prevTranslate.x) > 0.0001 ||
+        Math.abs(newT.y - prevTranslate.y) > 0.0001 ||
+        Math.abs(newT.z - prevTranslate.z) > 0.0001 ||
+        Math.abs(newR.x - prevRotate.x) > 0.0001 ||
+        Math.abs(newR.y - prevRotate.y) > 0.0001 ||
+        Math.abs(newR.z - prevRotate.z) > 0.0001 ||
+        Math.abs(newSc.x - prevScale.x) > 0.0001 ||
+        Math.abs(newSc.y - prevScale.y) > 0.0001 ||
+        Math.abs(newSc.z - prevScale.z) > 0.0001
+      ) {
+        prevTranslate = { ...newT };
+        prevRotate    = { ...newR };
+        prevScale     = { ...newSc };
+        persistSnapshot();
       }
     }, 80);
 
     return () => {
       clearInterval(id);
       if (densityTimer) clearTimeout(densityTimer);
+      if (snapshotTimer) clearTimeout(snapshotTimer);
     };
-  }, [heatmapActive]);
+  }, [activeHeatmapUuid]);
 
   const TABS = ['summary', 'cameras', 'pairs', 'map'] as const;
   const TAB_LABELS = { summary: 'Summary', cameras: 'Per Camera', pairs: 'Pairs', map: 'Coverage Map' };
+  const heatmapActive = activeHeatmapUuid !== null;
 
   return (
     <div style={ss.root}>
@@ -529,6 +740,7 @@ export const CoveragePanel: React.FC = () => {
             <CoverageMapTab
               result={result}
               heatmapActive={heatmapActive}
+              mapCount={(vs.coverageHeatmaps ?? []).length}
               onToggleHeatmap={handleToggleHeatmap}
             />
           )}
