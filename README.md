@@ -291,3 +291,11 @@ npx vitest run
 | `CameraMath.test.ts` | Focal-length ↔ FOV conversion, aspect ratio, all four film-fit modes |
 | `DependencyGraph.test.ts` | Plug dirty propagation |
 
+
+---
+
+## License
+
+This project is licensed under the **MIT License** — attribution required. See [LICENSE](LICENSE) for details.
+
+Copyright © 2026 Muriel
