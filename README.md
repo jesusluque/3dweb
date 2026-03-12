@@ -4,6 +4,17 @@ A browser-based 3D digital-content-creation (DCC) tool modelled after Autodesk M
 
 ---
 
+## Screenshots
+
+| HDRI / IBL lighting on a GLTF model | Anaglyph 3D stereo mode |
+|---|---|
+| ![HDRI lighting](webimages/3dweb_hydr.jpg) | ![Anaglyph 3D](webimages/3dweb_anag.jpg) |
+
+![Gaussian Splatting with Camera Mosaic](webimages/3dweb_sparkprev2.jpg)
+*Gaussian splat scene with Camera Mosaic overlay, floating camera view window, and crop volume controls*
+
+---
+
 ## Tech stack
 
 | Layer | Library / version |
