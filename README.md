@@ -21,7 +21,7 @@ A browser-based 3D digital-content-creation (DCC) tool modelled after Autodesk M
 |---|---|
 | UI framework | React 19 + TypeScript 5 |
 | Build tool | Vite 7 |
-| 3D renderer | Three.js r183 — WebGPU primary, WebGL fallback |
+| 3D renderer | Three.js r183 — WebGPU, WebGL  |
 | Gaussian splatting | `@sparkjsdev/spark` v2.0.0-preview + `gsplat` v1.2.9 |
 | State management | Zustand v5 |
 | Layout | FlexLayout-React v0.8 |
