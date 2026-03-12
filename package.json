@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@sparkjsdev/spark": "github:sparkjsdev/spark#v2.0.0-preview",
     "clsx": "^2.1.1",
     "flexlayout-react": "^0.8.18",
     "gsplat": "^1.2.9",

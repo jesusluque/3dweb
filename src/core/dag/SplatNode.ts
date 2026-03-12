@@ -14,7 +14,7 @@ export class SplatNode extends DAGNode {
    * Original file format, derived from the file extension.
    * Stored separately for quick access at load time.
    */
-  public fileFormat: 'splat' | 'ply' = 'splat';
+  public fileFormat: 'splat' | 'ply' | 'spz' | 'ksplat' | 'sog' | string = 'splat';
 
   /**
    * Runtime gsplat Splat object – set once the asset is loaded.

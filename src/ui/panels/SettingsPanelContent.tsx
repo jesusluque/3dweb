@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAppStore, ShadingModeType, type SplatOptSettings, type ViewportSettings } from '../store/useAppStore';
+import { useAppStore, ShadingModeType, type ViewportSettings } from '../store/useAppStore';
 import { dispatchViewport } from '../buses';
 import { RESOLUTION_PRESET_GROUPS } from '../data/resolutionPresets';
 
@@ -305,7 +305,7 @@ export const SettingsPanelContent: React.FC = () => {
   const [anaglyphOpen,  setAnaglyphOpen]  = useState(false);
   const [renderOpen,    setRenderOpen]    = useState(true);
   const [hdriOpen,      setHdriOpen]      = useState(true);
-  const [splatOpen,     setSplatOpen]     = useState(true);
+
 
   // Scene unit abbreviation used throughout sliders
   const unitAbbr: Record<string, string> = {
@@ -374,11 +374,7 @@ export const SettingsPanelContent: React.FC = () => {
     vm?.setAnaglyphIPD(v);
   };
 
-  const updateSplatOpt = (patch: Partial<SplatOptSettings>) => {
-    const next = { ...vs.splatOpt, ...patch };
-    updateVS({ splatOpt: next });
-    dispatchViewport.setSplatOpt(next);
-  };
+
 
   // ── HDRI handlers ────────────────────────────────────────────────────────
   const toggleHdri    = () => { const n = !vs.hdriEnabled; updateVS({ hdriEnabled: n }); dispatchViewport.setHdriEnabled(n); };
@@ -657,69 +653,7 @@ export const SettingsPanelContent: React.FC = () => {
         </>
       )}
 
-      {/* ── GAUSSIAN SPLAT ────────────────────────────────────────── */}
-      <Sec title="Gaussian Splat" tag="gsplat" open={splatOpen} onToggle={() => setSplatOpen(v => !v)} />
-      {splatOpen && (
-        <>
-          {/* Sub-header: active */}
-          <div style={{
-            padding: '3px 10px', fontSize: 9,
-            fontFamily: '"Segoe UI",system-ui,sans-serif',
-            color: C.green, letterSpacing: '0.4px', textTransform: 'uppercase',
-            background: C.bgRaise, borderBottom: `1px solid ${C.border}`,
-          }}>Active optimizations</div>
 
-          <ToggleRow
-            label="Worker Sort"
-            checked={vs.splatOpt.workerSort}
-            onChange={() => updateSplatOpt({ workerSort: !vs.splatOpt.workerSort })}
-          />
-          <ToggleRow
-            label="Radix Sort"
-            checked={vs.splatOpt.radixSort}
-            onChange={() => updateSplatOpt({ radixSort: !vs.splatOpt.radixSort })}
-          />
-          <ToggleRow
-            label="Lazy Re-sort"
-            checked={vs.splatOpt.lazyResort}
-            onChange={() => updateSplatOpt({ lazyResort: !vs.splatOpt.lazyResort })}
-          />
-          <ToggleRow
-            label="Throttle"
-            checked={vs.splatOpt.throttle}
-            onChange={() => updateSplatOpt({ throttle: !vs.splatOpt.throttle })}
-          />
-          <ToggleRow
-            label="Frustum Cull"
-            checked={vs.splatOpt.frustumCull}
-            onChange={() => updateSplatOpt({ frustumCull: !vs.splatOpt.frustumCull })}
-          />
-          <ToggleRow
-            label="GPU Indirect"
-            checked={vs.splatOpt.gpuIndirect}
-            onChange={() => updateSplatOpt({ gpuIndirect: !vs.splatOpt.gpuIndirect })}
-          />
-          <SliderRow
-            label="Alpha Threshold"
-            value={vs.splatOpt.alphaThreshold}
-            min={0} max={0.1} step={0.002}
-            unit="α"
-            onChange={v => updateSplatOpt({ alphaThreshold: v })}
-          />
-          <SliderRow
-            label="LOD (screen px)"
-            value={vs.splatOpt.lodFactor}
-            min={0.05} max={1.0} step={0.05}
-            unit="px"
-            onChange={v => updateSplatOpt({ lodFactor: v })}
-          />
-          <ToggleRow
-            label="Streaming LOD"
-            checked={vs.splatOpt.streamingLOD}
-            onChange={() => updateSplatOpt({ streamingLOD: !vs.splatOpt.streamingLOD })}
-          />
-        </>
-      )}
 
     </div>
   );

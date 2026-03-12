@@ -3,8 +3,7 @@ import * as THREE from 'three';
 import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu';
 // @ts-ignore
 import { texture as tslTexture, vec4, float } from 'three/tsl';
-import * as SPLAT from 'gsplat';
-import { SplatMesh, type SplatOpts, DEFAULT_SPLAT_OPTS } from './SplatMesh';
+import { SplatMesh, SparkRenderer } from './SplatMesh';
 import { EngineCore } from '../EngineCore';
 import { CameraNode } from '../dag/CameraNode';
 import { DAGNode } from '../dag/DAGNode';
@@ -104,13 +103,13 @@ export class ViewportManager {
    *  element changes size (after flexlayout reflow), not on window.resize. */
   private _resizeObserver: ResizeObserver | null = null;
 
-  // ── Native Gaussian Splatting (SplatMesh – shares three.js depth buffer) ────
-  /** Maps SplatNode UUID → the SplatMesh currently in the three.js scene. */
+  // ── Spark 2.0 GPU-accelerated Gaussian Splatting ────────────────────────────
+  /** Spark renderer — drives sorting, LoD, and rendering for all SplatMesh objects. */
+  private _sparkRenderer: SparkRenderer | null = null;
+  /** Maps SplatNode UUID → the Spark SplatMesh currently in the three.js scene. */
   private _splatMeshMap: Map<string, SplatMesh> = new Map();
   /** Maps SplatNode UUID → its Box3Helper crop visualisation. */
   private _splatCropHelperMap: Map<string, THREE.Box3Helper> = new Map();
-  /** Current splat optimisation options applied to every SplatMesh. */
-  private _splatOpts: SplatOpts = { ...DEFAULT_SPLAT_OPTS };
 
   // ── Interactive Crop Gizmo (T key when SplatNode is selected) ─────────────
   private _cropGizmo:         CropGizmo  | null = null;
@@ -379,6 +378,8 @@ export class ViewportManager {
     if (this._rendererType !== 'webgl' && this.renderer.init) {
       this.renderer.init().then(() => {
         this.core.logger.log('WebGPU renderer initialized successfully.', 'info');
+        // Spark 2.0 requires a THREE.WebGLRenderer; not available in WebGPU mode.
+        // Splats will still load but won't be rendered until the user switches to WebGL.
         this.isRendering = true;
         this.renderLoop();
       });
@@ -389,6 +390,13 @@ export class ViewportManager {
           : 'WebGL renderer initialized (WebGPU fallback).',
         this._rendererType === 'webgl' ? 'info' : 'warn',
       );
+      // Spark 2.0 — create the SparkRenderer and attach it to the scene.
+      // Only THREE.WebGLRenderer is supported; WebGPURenderer is skipped.
+      if (this.renderer instanceof THREE.WebGLRenderer) {
+        this._sparkRenderer = new SparkRenderer({ renderer: this.renderer });
+        this.scene.add(this._sparkRenderer);
+        this.core.logger.log('Spark 2.0 renderer initialized.', 'info');
+      }
       this.isRendering = true;
       this.renderLoop();
     }
@@ -808,16 +816,6 @@ export class ViewportManager {
     this.outlinePixels = Math.max(0.1, px);
   }
 
-  // ── Gaussian Splat optimisations ────────────────────────────────────────
-
-  /** Apply splat optimisation options to all active and future SplatMesh instances. */
-  public setSplatOpt(opts: SplatOpts): void {
-    this._splatOpts = { ...opts };
-    for (const mesh of this._splatMeshMap.values()) {
-      mesh.setOptions(this._splatOpts);
-    }
-  }
-
   // ── Anaglyph 3D ─────────────────────────────────────────────────────────
 
   /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
@@ -1153,17 +1151,13 @@ export class ViewportManager {
       // ── Gaussian Splat (native three.js renderer — shares depth buffer) ──
       obj = new THREE.Group();
 
-      const loadSplat = (fileData: string, fileFormat: 'splat' | 'ply') => {
+      const loadSplat = (fileData: string, fileFormat: string) => {
         try {
           const binary = Uint8Array.from(atob(fileData), c => c.charCodeAt(0));
-          const tmpScene = new SPLAT.Scene();
-          const splatObj: SPLAT.Splat = fileFormat === 'ply'
-            ? SPLAT.PLYLoader.LoadFromArrayBuffer(binary.buffer, tmpScene)
-            : SPLAT.Loader.LoadFromArrayBuffer(binary.buffer, tmpScene);
-          const mesh = new SplatMesh();
-          mesh.updateFromData(splatObj.data);
-          mesh.setOptions(this._splatOpts);
-          if (this._anaglyphEnabled) mesh.setLinearOutput(true);
+          const mesh = new SplatMesh({
+            fileBytes: binary,
+            fileName:  `splat.${fileFormat}`,
+          });
           node._splatObject = mesh;
           obj.add(mesh);
           this._splatMeshMap.set(node.uuid, mesh);
@@ -1178,7 +1172,6 @@ export class ViewportManager {
       if (node._splatObject) {
         // Already has a SplatMesh (e.g. redo) — re-attach to scene.
         const mesh = node._splatObject as SplatMesh;
-        mesh.setOptions(this._splatOpts);
         obj.add(mesh);
         this._splatMeshMap.set(node.uuid, mesh);
       } else if (node.fileData) {
@@ -1634,36 +1627,13 @@ export class ViewportManager {
   // ── Native Gaussian Splatting helpers ──────────────────────────────────────
 
   /**
-   * Sort all SplatMesh instances front-to-back and update their per-frame
-   * uniforms (camera matrices, focal length, viewport size).
-   * Called once per frame BEFORE the main three.js render pass so that
-   * depth compositing with geometry works correctly.
+   * No-op: Spark 2.0 handles sorting and rendering automatically via SparkRenderer.
+   * Kept so call-sites in the render loop compile without changes.
    */
-  private _updateSplats(): void {
-    if (this._splatMeshMap.size === 0) return;
-    // Use gate dimensions, not canvas clientWidth/clientHeight.
-    // The gate.w/gate.h ratio always equals camera.aspect (renderResolution ratio),
-    // which is required by the GS vertex shader: uViewport.x/uViewport.y must
-    // equal camera.aspect for splats to project as circles instead of ovals.
-    const gate = this._gateViewport();
-    const w = gate.w;
-    const h = gate.h;
-    if (w <= 0 || h <= 0) return;
-    for (const mesh of this._splatMeshMap.values()) {
-      mesh.sort(this.camera);
-      mesh.updateUniforms(this.camera, w, h);
-    }
-  }
+  private _updateSplats(): void { /* Spark 2.0 handles this automatically */ }
 
-  /** Update GS shader uniforms for a specific camera (used per-eye in anaglyph mode). */
-  private _refreshSplatUniforms(camera: THREE.PerspectiveCamera): void {
-    if (this._splatMeshMap.size === 0) return;
-    // Gate dimensions ensure uViewport.x/uViewport.y = camera.aspect → round splats.
-    const gate = this._gateViewport();
-    for (const mesh of this._splatMeshMap.values()) {
-      mesh.updateUniforms(camera, gate.w, gate.h);
-    }
-  }
+  /** No-op: Spark 2.0 handles per-camera uniform updates automatically. */
+  private _refreshSplatUniforms(_camera: THREE.PerspectiveCamera): void { /* Spark 2.0 handles this automatically */ }
 
   // ── Public control API ─────────────────────────────────────────────────────
 
@@ -1769,11 +1739,14 @@ export class ViewportManager {
       });
       this._dirArrowMap.delete(uuid);
     }
-    // Clean up native SplatMesh
+    // Clean up Spark 2.0 SplatMesh
     const splatMesh = this._splatMeshMap.get(uuid);
     if (splatMesh) {
       splatMesh.dispose();
       this._splatMeshMap.delete(uuid);
+      // Clear the runtime reference so redo re-creates from base64 fileData
+      const dagNode = this.core.sceneGraph.getNodeById(uuid);
+      if (dagNode instanceof SplatNode) dagNode._splatObject = null;
     }
     // Clean up crop helper (child of the node group, removed with scene.remove(obj))
     this._splatCropHelperMap.delete(uuid);
@@ -2310,7 +2283,7 @@ export class ViewportManager {
       const [handle] = await (window as any).showOpenFilePicker({
         types: [{
           description: 'Gaussian Splat Files',
-          accept: { 'application/octet-stream': ['.splat', '.ply'] },
+          accept: { 'application/octet-stream': ['.splat', '.ply', '.spz', '.ksplat', '.sog', '.zip', '.rad'] },
         }],
         multiple: false,
       });
@@ -2320,34 +2293,23 @@ export class ViewportManager {
     }
 
     const buffer = await file.arrayBuffer();
-    const ext    = (file.name.split('.').pop() ?? 'splat').toLowerCase() as 'splat' | 'ply';
-
-    // Load into a temp scene so the Splat is NOT yet in _splatScene;
-    // addNodeToView will register it properly (supports undo / redo too).
-    const tmpScene = new SPLAT.Scene();
-    let splatObj: SPLAT.Splat;
-    try {
-      splatObj = ext === 'ply'
-        ? SPLAT.PLYLoader.LoadFromArrayBuffer(buffer, tmpScene)
-        : SPLAT.Loader.LoadFromArrayBuffer(buffer, tmpScene);
-    } catch (e) {
-      this.core.logger.log(`Splat import failed: ${(e as any)?.message ?? e}`, 'error');
-      return;
-    }
+    const ext    = (file.name.split('.').pop() ?? 'splat').toLowerCase();
 
     const baseName = file.name.replace(/\.[^.]+$/, '');
     const name     = this.nextAvailableName(baseName || 'splat');
 
     const node = new SplatNode(name);
     node.fileName.setValue(file.name);
-    node.fileFormat  = ext;
-    // GSplat convention: Y-up world but data is stored Y-down → flip 180° on X
-    node.rotate.setValue({ x: 180, y: 0, z: 0 });
+    node.fileFormat  = ext as typeof node.fileFormat;
+    // Spark 2.0 coordinate convention: apply Z-axis -180° flip so models
+    // appear upright without requiring manual correction after import.
+    node.rotate.setValue({ x: 0, y: 0, z: -180 });
 
-    // Pre-build SplatMesh from the already-decoded data (avoids a second decode
-    // from base64 when addNodeToView is called immediately after).
-    const mesh = new SplatMesh();
-    mesh.updateFromData(splatObj.data);
+    // Pre-build SplatMesh using Spark 2.0 (async, GPU-accelerated)
+    const mesh = new SplatMesh({
+      fileBytes: new Uint8Array(buffer),
+      fileName:  file.name,
+    });
     node._splatObject = mesh;
 
     // Embed raw bytes as base64 for scene serialisation

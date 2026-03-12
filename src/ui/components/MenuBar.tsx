@@ -286,7 +286,7 @@ export const MenuBar: React.FC = () => {
         { label: 'Save Scene As…',  shortcut: '⌘⇧S',  action: () => { saveSceneAs(); } },
         { divider: true } as MenuItem,
         { label: 'Import GLB / GLTF…',                  action: () => dispatchScene.importGltf() },
-        { label: 'Import Gaussian Splat (.splat / .ply)…', action: () => dispatchScene.importSplat() },
+        { label: 'Import Gaussian Splat (.splat / .ply / .spz / .ksplat / .sog / .rad)…', action: () => dispatchScene.importSplat() },
         { label: 'Import Point Cloud / Mesh (.ply)…',      action: () => dispatchScene.importPly() },
         { label: 'Export All…',     disabled: true, action: () => {} },
       ],
