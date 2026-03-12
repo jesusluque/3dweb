@@ -1,8 +1,6 @@
 import * as THREE from 'three';
 // @ts-ignore
-import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu';
-// @ts-ignore
-import { texture as tslTexture, vec4, float } from 'three/tsl';
+import { WebGPURenderer } from 'three/webgpu';
 import { SplatMesh, SparkRenderer } from './SplatMesh';
 import { EngineCore } from '../EngineCore';
 import { CameraNode } from '../dag/CameraNode';
@@ -78,21 +76,7 @@ export class ViewportManager {
   private outlinePixels   = 2.5;         // desired screen-space thickness in px
   // ── Anaglyph 3D stereo effect ────────────────────────────────────────────
   private _anaglyphEnabled = false;
-  private _stereo:     THREE.StereoCamera | null = null;
-  private _leftRT:     THREE.WebGLRenderTarget | null = null;
-  private _rightRT:    THREE.WebGLRenderTarget | null = null;
-  private _quadScene:  THREE.Scene | null = null;
-  private _quadCamera: THREE.OrthographicCamera | null = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _compMat:    any = null;  // MeshBasicNodeMaterial (three/webgpu)
-  /** Set when the RT dimensions are stale (e.g. after a resize) so the rebuild
-   *  is deferred to the start of the NEXT renderLoop tick, never mid-frame. */
-  private _anaglyphRTDirty = false;
-  /** True once the compositor shader pipeline has been compiled and the
-   *  composite pass is safe to run.  Set to false whenever resources are
-   *  rebuilt; set to true after renderer.compileAsync() resolves so the
-   *  first composite frame is never fed an uncompiled WebGPU pipeline. */
-  private _anaglyphReady = false;
+  private _stereo: THREE.StereoCamera | null = null;
   /** requestAnimationFrame handle — kept so dispose() can cancel a pending tick. */
   private _rafHandle = 0;
   /** The active renderer back-end type for this viewport instance. */
@@ -821,18 +805,9 @@ export class ViewportManager {
   /** Enable / disable anaglyph stereo mode. `ipd` is Inter-Pupillary Distance in metres. */
   public setAnaglyphEnabled(enabled: boolean, ipd: number): void {
     this._anaglyphEnabled = enabled;
-    for (const mesh of this._splatMeshMap.values()) mesh.setLinearOutput(enabled);
     if (enabled) {
-      // Initialise the StereoCamera here so IPD is ready, but defer actual
-      // RT/compositor creation to the start of the next renderLoop tick.
-      // This avoids WebGPU "texture already initialised" mid-frame errors and
-      // prevents reading uncleared GPU memory on the very first anaglyph frame.
       if (!this._stereo) this._stereo = new THREE.StereoCamera();
       this._stereo.eyeSep = ipd;
-      this._anaglyphRTDirty = true;
-    } else {
-      this._anaglyphRTDirty = false;
-      this._destroyAnaglyphResources();
     }
   }
 
@@ -849,10 +824,6 @@ export class ViewportManager {
     // Camera aspect is always the RENDER resolution ratio, not the panel ratio.
     this.camera.aspect = this.renderResolution.w / this.renderResolution.h;
     this.camera.updateProjectionMatrix();
-    // RTs must match the new gate size so the compositor has no distortion.
-    if (this._anaglyphEnabled && this._stereo) {
-      this._anaglyphRTDirty = true;
-    }
   };
 
   private syncInit() {
@@ -1273,10 +1244,7 @@ export class ViewportManager {
 
     // Flush deferred anaglyph RT rebuild BEFORE any rendering starts.
     // This avoids mutating WebGPU textures mid-frame ("Texture already initialized").
-    if (this._anaglyphRTDirty && this._anaglyphEnabled && this._stereo) {
-      this._anaglyphRTDirty = false;
-      this._buildAnaglyphResources(this._stereo.eyeSep);
-    }
+    // (no-op now that anaglyph uses color-mask instead of render targets)
 
     // When looking through a CameraNode, sync the render camera each frame
     if (this.activeCamUuid) {
@@ -1433,79 +1401,47 @@ export class ViewportManager {
     return { x: bX, y: vpH - bY - gH, w: gW, h: gH };
   }
 
-  /** Render the main viewport — stereo anaglyph (RT composite) or normal.
+  /** Render the main viewport — stereo anaglyph (color-mask) or normal.
    *  Always clips to the gate rect so the 3D image is never stretched
    *  when the panel aspect differs from the render resolution aspect. */
   private _renderMain(): void {
     const gate = this._gateViewport();
 
-    if (
-      this._anaglyphEnabled && this._stereo &&
-      this._leftRT && this._rightRT && this._quadScene && this._quadCamera
-    ) {
-      // ── Anaglyph via render-target composite ─────────────────────────
-      // Guard: if the panel was laid out after setAnaglyphEnabled fired (e.g.
-      // React useEffect before flexlayout settles), the RT pixel dimensions may
-      // not match the current gate. Schedule a rebuild for the next tick and
-      // skip the anaglyph pass this frame to avoid mid-frame WebGPU mutations.
-      const dpr = window.devicePixelRatio;
-      const gPW = Math.max(1, Math.round(gate.w * dpr));
-      const gPH = Math.max(1, Math.round(gate.h * dpr));
-      if (this._leftRT.width !== gPW || this._leftRT.height !== gPH) {
-        this._anaglyphRTDirty = true;
-        // Fall through to normal render for this frame
-      } else if (!this._anaglyphReady) {
-        // Pipeline not compiled yet — fall through to normal render this frame.
-        // (_anaglyphReady is set by compileAsync after _buildAnaglyphResources)
-      } else {
-        this._stereo.update(this.camera);
+    if (this._anaglyphEnabled && this._stereo) {
+      // ── Anaglyph via WebGL color-mask ─────────────────────────────────────
+      // Each eye renders directly to screen; GPU color-write masking isolates
+      // channels — no render targets, no color-space conversion.
+      this._stereo.update(this.camera);
 
-        const prevAutoClear  = this.renderer.autoClear;
-        const prevColorSpace = this.renderer.outputColorSpace ?? null;
+      const gl = (this.renderer as THREE.WebGLRenderer).getContext();
+      const prevAutoClear = this.renderer.autoClear;
 
-        // Eye renders: use LinearSRGBColorSpace so materials write linear values
-        // into the RTs (no sRGB encoding). The composite's colorspace_fragment
-        // then applies a single sRGB encode → correct brightness for all geometry,
-        // background, and grid. GS pre-decodes its sRGB file colours to linear
-        // (via uLinearOutput uniform) so the composite re-encodes them back to
-        // the original values — identical brightness to normal rendering.
-        if (prevColorSpace !== null) {
-          this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-        }
-        this.renderer.autoClear = true;
+      this.renderer.setScissorTest(true);
+      this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
+      this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
 
-        // Render each eye into its own RT.
-        // GS uses custom shader uniforms (viewMatrix, projectionMatrix, uFocal)
-        // that must be refreshed per eye — not auto-updated by Three.js.
-        this._refreshSplatUniforms(this._stereo.cameraL);
-        this.renderer.setRenderTarget(this._leftRT);
-        this.renderer.render(this.scene, this._stereo.cameraL);
+      // Clear once (fills background color into all channels)
+      this.renderer.autoClear = true;
+      this.renderer.clear(true, true, true);
 
-        this._refreshSplatUniforms(this._stereo.cameraR);
-        this.renderer.setRenderTarget(this._rightRT);
-        this.renderer.render(this.scene, this._stereo.cameraR);
+      // Left eye — RED channel only
+      this.renderer.autoClear = false;
+      gl.colorMask(true, false, false, false);
+      this.renderer.render(this.scene, this._stereo.cameraL);
 
-        // Restore uniforms and color space before the composite pass.
-        this._refreshSplatUniforms(this.camera);
-        if (prevColorSpace !== null) {
-          this.renderer.outputColorSpace = prevColorSpace;
-        }
+      // Clear depth so right eye depth-tests against itself
+      this.renderer.clear(false, true, false);
 
-        // Back to screen — clear canvas then composite quad into gate area.
-        this.renderer.setRenderTarget(null);
-        this.renderer.autoClear = false;
-        this.renderer.clear(true, true, true);   // clears full canvas (bars → bg colour)
+      // Right eye — GREEN + BLUE channels only
+      gl.colorMask(false, true, true, false);
+      this.renderer.render(this.scene, this._stereo.cameraR);
 
-        this.renderer.setScissorTest(true);
-        this.renderer.setScissor(gate.x, gate.y, gate.w, gate.h);
-        this.renderer.setViewport(gate.x, gate.y, gate.w, gate.h);
-        this.renderer.render(this._quadScene, this._quadCamera);
-
-        this.renderer.setScissorTest(false);
-        this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
-        this.renderer.autoClear = prevAutoClear;
-        return;
-      }
+      // Restore
+      gl.colorMask(true, true, true, true);
+      this.renderer.autoClear = prevAutoClear;
+      this.renderer.setScissorTest(false);
+      this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
+      return;
     }
 
     // Normal render — clip to gate so nothing outside is drawn
@@ -1515,113 +1451,6 @@ export class ViewportManager {
     this.renderer.render(this.scene, this.camera);
     this.renderer.setScissorTest(false);
     this.renderer.setViewport(0, 0, this.container.clientWidth, this.container.clientHeight);
-  }
-
-  private _buildAnaglyphResources(ipd: number): void {
-    // StereoCamera
-    if (!this._stereo) this._stereo = new THREE.StereoCamera();
-    this._stereo.eyeSep = ipd;
-
-    // Size RTs to the gate at current DPR — must share the renderRes aspect ratio.
-    // IMPORTANT: always recreate RTs and the compositor so texture references stay fresh.
-    const gate = this._gateViewport();
-    const dpr  = window.devicePixelRatio;
-    const w    = Math.max(1, Math.round(gate.w * dpr));
-    const h    = Math.max(1, Math.round(gate.h * dpr));
-
-    this._leftRT?.dispose();
-    this._rightRT?.dispose();
-    (this._compMat as THREE.Material | null)?.dispose();
-
-    // HalfFloatType preserves linear values from the eye renders without 8-bit
-    // quantization. UnsignedByteType (default) loses precision on dark linear
-    // values: e.g. sRGB 0.1 → linear 0.010 → stored as 3/255 → re-encodes to
-    // 0.110, brightening dark areas in anaglyph vs normal mode.
-    const rtOpts = { type: THREE.HalfFloatType };
-    this._leftRT  = new THREE.WebGLRenderTarget(w, h, rtOpts);
-    this._rightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
-
-    if (this._rendererType === 'webgl') {
-      // Eye RTs hold linear values (rendered with LinearSRGBColorSpace).
-      // The composite applies #include <colorspace_fragment> which encodes the
-      // linear values to sRGB exactly once — identical to a normal single render.
-      // GS pre-decodes its sRGB file colours via uLinearOutput so the final
-      // encoded result matches normal mode.
-      this._compMat = new THREE.ShaderMaterial({
-        uniforms: {
-          mapLeft:  { value: this._leftRT.texture  },
-          mapRight: { value: this._rightRT.texture },
-        },
-        vertexShader: [
-          'varying vec2 vUv;',
-          'void main() {',
-          '  vUv = uv;',
-          '  gl_Position = vec4(position, 1.0);',
-          '}',
-        ].join('\n'),
-        fragmentShader: [
-          'uniform sampler2D mapLeft;',
-          'uniform sampler2D mapRight;',
-          'varying vec2 vUv;',
-          'void main() {',
-          '  vec4 l = texture2D(mapLeft,  vUv);',
-          '  vec4 r = texture2D(mapRight, vUv);',
-          '  gl_FragColor = vec4(l.r, r.g, r.b, 1.0);',
-          '  #include <colorspace_fragment>',
-          '}',
-        ].join('\n'),
-        depthTest: false,
-        depthWrite: false,
-      });
-    } else {
-      // WebGPU: TSL node material
-      const leftTex  = tslTexture(this._leftRT.texture);
-      const rightTex = tslTexture(this._rightRT.texture);
-      this._compMat  = new MeshBasicNodeMaterial();
-      this._compMat.colorNode = vec4(leftTex.r, rightTex.g, rightTex.b, float(1));
-    }
-
-    this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    this._quadScene  = new THREE.Scene();
-    // WebGPU stores render-target texels with Y=0 at the top (NDC origin differs
-    // from OpenGL/WebGL where Y=0 is at the bottom). Flip UV.y on the quad
-    // geometry so the composite reads rows in the correct order.
-    // WebGL uses the same convention as PlaneGeometry UVs (no flip needed).
-    const geo = new THREE.PlaneGeometry(2, 2);
-    if (this._rendererType !== 'webgl') {
-      const uvAttr = geo.attributes.uv as THREE.BufferAttribute;
-      for (let i = 0; i < uvAttr.count; i++) uvAttr.setY(i, 1 - uvAttr.getY(i));
-    }
-    this._quadScene.add(new THREE.Mesh(geo, this._compMat));
-
-    // Pre-compile the compositor shader pipeline so the very first composite
-    // frame is never rendered with an unfinished (crushed/blank) WebGPU pipeline.
-    // Falls through to normal render until compilation completes.
-    // NOTE: compileAsync is only called for WebGPU — WebGL ShaderMaterial
-    // compiles synchronously and WebGLRenderer.compileAsync has known
-    // incompatibilities with ShaderMaterial (crashes on isReady check).
-    this._anaglyphReady = false;
-    if (this._rendererType !== 'webgl' && this._quadScene && this._quadCamera) {
-      this.renderer.compileAsync(this._quadScene, this._quadCamera)
-        .then(() => { this._anaglyphReady = true; })
-        .catch(() => { this._anaglyphReady = true; }); // best-effort fallback
-    } else {
-      // WebGL ShaderMaterial is ready synchronously
-      this._anaglyphReady = true;
-    }
-  }
-
-  private _destroyAnaglyphResources(): void {
-    this._leftRT?.dispose();
-    this._rightRT?.dispose();
-    (this._compMat as THREE.Material | null)?.dispose();
-    this._leftRT     = null;
-    this._rightRT    = null;
-    this._compMat    = null;
-    this._quadScene  = null;
-    this._quadCamera = null;
-    this._anaglyphReady = false;
-    // _stereo is lightweight — keep for reuse
   }
 
   // ── Native Gaussian Splatting helpers ──────────────────────────────────────
@@ -2301,9 +2130,10 @@ export class ViewportManager {
     const node = new SplatNode(name);
     node.fileName.setValue(file.name);
     node.fileFormat  = ext as typeof node.fileFormat;
-    // Spark 2.0 coordinate convention: apply Z-axis -180° flip so models
-    // appear upright without requiring manual correction after import.
-    node.rotate.setValue({ x: 0, y: 0, z: -180 });
+    // 3DGS files use COLMAP/OpenCV convention: Y-down, Z-forward.
+    // Three.js uses Y-up, Z-toward-viewer.  A 180° rotation around X
+    // flips both Y and Z simultaneously — the minimal correct transform.
+    node.rotate.setValue({ x: 180, y: 0, z: 0 });
 
     // Pre-build SplatMesh using Spark 2.0 (async, GPU-accelerated)
     const mesh = new SplatMesh({
@@ -2746,7 +2576,6 @@ export class ViewportManager {
     if (this._cropGizmo) { this._cropGizmo.dispose(); this._cropGizmo = null; }
     this.transformControls.dispose();
     this.controls.dispose();
-    this._destroyAnaglyphResources();
     this.container.removeChild(this.renderer.domElement);
     this.renderer.dispose();
 
