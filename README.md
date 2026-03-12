@@ -42,7 +42,7 @@ npm run lint       # ESLint
 ```
 
 > **Requirements:** Node 20+, a browser with WebGPU support (Chrome 113+, Edge 113+).  
-> WebGL is used automatically when WebGPU is unavailable.
+> WebGL or WebGPU 
 
 ---
 
