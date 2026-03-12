@@ -209,6 +209,9 @@ export const ViewportPanel: React.FC = () => {
     const onImportSplat = () => {
       vm.importSplat().then(() => markSceneDirty());
     };
+    const onImportPly = () => {
+      vm.importPly().then(() => markSceneDirty());
+    };
     const onLookThroughCamera = (e: Event) => {
       const uuid = (e as CustomEvent<string | null>).detail;
       vm.lookThroughCamera(uuid);
@@ -260,6 +263,7 @@ export const ViewportPanel: React.FC = () => {
     sceneBus   .addEventListener('createLight',       onCreateLight);
     sceneBus   .addEventListener('importGltf',        onImportGltf);
     sceneBus   .addEventListener('importSplat',       onImportSplat);
+    sceneBus   .addEventListener('importPly',         onImportPly);
     sceneBus   .addEventListener('groupSelected',      onGroupSelected);
     sceneBus   .addEventListener('ungroupSelected',    onUngroupSelected);
     sceneBus   .addEventListener('reparentNode',       onReparentNode);
@@ -291,6 +295,7 @@ export const ViewportPanel: React.FC = () => {
       sceneBus   .removeEventListener('createLight',       onCreateLight);
       sceneBus   .removeEventListener('importGltf',        onImportGltf);
       sceneBus   .removeEventListener('importSplat',       onImportSplat);
+      sceneBus   .removeEventListener('importPly',         onImportPly);
       sceneBus   .removeEventListener('groupSelected',     onGroupSelected);
       sceneBus   .removeEventListener('ungroupSelected',   onUngroupSelected);
       sceneBus   .removeEventListener('reparentNode',      onReparentNode);

@@ -13,9 +13,11 @@ import { MeshNode } from '../dag/MeshNode';
 import { LightNode, LightType } from '../dag/LightNode';
 import { GltfNode } from '../dag/GltfNode';
 import { SplatNode } from '../dag/SplatNode';
+import { PlyNode } from '../dag/PlyNode';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { PLYLoader as ThreePLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 
@@ -1098,6 +1100,55 @@ export class ViewportManager {
         obj = new THREE.Group();
       }
 
+    } else if (node instanceof PlyNode) {
+      // ── Standard PLY (point cloud or triangulated mesh) ──────────────────
+      // THREE.js PLYLoader.parse() is synchronous — no placeholder swap needed.
+      const buildPlyObject = (geometry: THREE.BufferGeometry): THREE.Object3D => {
+        geometry.computeBoundingBox();
+        geometry.computeVertexNormals();
+        if (geometry.index) {
+          const mat = new THREE.MeshStandardMaterial({
+            vertexColors: geometry.hasAttribute('color'),
+            side: THREE.DoubleSide,
+          });
+          return new THREE.Mesh(geometry, mat);
+        } else {
+          const mat = new THREE.PointsMaterial({
+            size: node.pointSize.getValue(),
+            vertexColors: geometry.hasAttribute('color'),
+            sizeAttenuation: true,
+          });
+          return new THREE.Points(geometry, mat);
+        }
+      };
+
+      if (node._loadedObject) {
+        obj = node._loadedObject;
+      } else if (node.fileData) {
+        try {
+          const binary = Uint8Array.from(atob(node.fileData), c => c.charCodeAt(0));
+          const geometry = new ThreePLYLoader().parse(binary.buffer);
+          node.plyType = geometry.index ? 'mesh' : 'pointcloud';
+          const plyObj = buildPlyObject(geometry);
+          node._loadedObject = plyObj;
+          obj = plyObj;
+        } catch (e) {
+          this.core.logger.log(`PLY parse failed for "${node.name}": ${(e as any)?.message ?? e}`, 'error');
+          obj = new THREE.Group();
+        }
+      } else {
+        obj = new THREE.Group();
+      }
+
+      // Wire pointSize → PointsMaterial.size live update
+      node.pointSize.onDirty = () => {
+        const plyObj = this.nodeMap.get(node.uuid);
+        if (plyObj instanceof THREE.Points) {
+          (plyObj.material as THREE.PointsMaterial).size = node.pointSize.getValue();
+          (plyObj.material as THREE.PointsMaterial).needsUpdate = true;
+        }
+      };
+
     } else if (node instanceof SplatNode) {
       // ── Gaussian Splat (native three.js renderer — shares depth buffer) ──
       obj = new THREE.Group();
@@ -2003,6 +2054,18 @@ export class ViewportManager {
       gn.scale.setValue({ ...src.scale.getValue() });
       gn.visibility.setValue(src.visibility.getValue());
       clone = gn;
+    } else if (src instanceof PlyNode) {
+      const pn = new PlyNode(this.nextAvailableName(src.name));
+      pn.fileName.setValue(src.fileName.getValue());
+      pn.pointSize.setValue(src.pointSize.getValue());
+      pn.fileData = src.fileData;
+      pn.plyType = src.plyType;
+      // _loadedObject is left null — addNodeToView will rebuild from fileData
+      pn.translate.setValue({ ...src.translate.getValue() });
+      pn.rotate.setValue({ ...src.rotate.getValue() });
+      pn.scale.setValue({ ...src.scale.getValue() });
+      pn.visibility.setValue(src.visibility.getValue());
+      clone = pn;
     } else if (src instanceof SplatNode) {
       const sn = new SplatNode(this.nextAvailableName(src.name));
       sn.fileName.setValue(src.fileName.getValue());
@@ -2301,6 +2364,78 @@ export class ViewportManager {
     );
     this.core.commandHistory.execute(cmd);
     this.core.logger.log(`Imported splat "${file.name}" as "${name}"`, 'info');
+    this.onSceneChanged?.();
+  }
+
+  /** Open the system file picker and import a standard PLY file (point cloud or mesh). */
+  public async importPly(): Promise<void> {
+    let file: File;
+    try {
+      const [handle] = await (window as any).showOpenFilePicker({
+        types: [{
+          description: 'PLY Point Cloud / Mesh',
+          accept: { 'application/octet-stream': ['.ply'] },
+        }],
+        multiple: false,
+      });
+      file = await handle.getFile();
+    } catch {
+      return; // user cancelled
+    }
+
+    const buffer = await file.arrayBuffer();
+
+    let geometry: THREE.BufferGeometry;
+    try {
+      geometry = new ThreePLYLoader().parse(buffer);
+    } catch (e) {
+      this.core.logger.log(`PLY import failed: ${(e as any)?.message ?? e}`, 'error');
+      return;
+    }
+
+    geometry.computeBoundingBox();
+    geometry.computeVertexNormals();
+
+    const baseName = file.name.replace(/\.[^.]+$/, '');
+    const name = this.nextAvailableName(baseName || 'ply');
+
+    const node = new PlyNode(name);
+    node.fileName.setValue(file.name);
+    node.plyType = geometry.index ? 'mesh' : 'pointcloud';
+
+    // Build the Three.js renderable immediately (no async, parse already done)
+    const hasFaces = geometry.index !== null;
+    let plyObj: THREE.Object3D;
+    if (hasFaces) {
+      const mat = new THREE.MeshStandardMaterial({
+        vertexColors: geometry.hasAttribute('color'),
+        side: THREE.DoubleSide,
+      });
+      plyObj = new THREE.Mesh(geometry, mat);
+    } else {
+      const mat = new THREE.PointsMaterial({
+        size: 0.01,
+        vertexColors: geometry.hasAttribute('color'),
+        sizeAttenuation: true,
+      });
+      plyObj = new THREE.Points(geometry, mat);
+    }
+    node._loadedObject = plyObj;
+
+    // Embed raw bytes as base64 for scene serialisation
+    const bytes = new Uint8Array(buffer);
+    let bin = '';
+    for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+    node.fileData = btoa(bin);
+
+    const cmd = new CreateNodeCommand(
+      node, undefined,
+      this.core.sceneGraph, this.core.selectionManager,
+      (n) => this.addNodeToView(n),
+      (id) => this.removeNodeFromView(id),
+    );
+    this.core.commandHistory.execute(cmd);
+    this.core.logger.log(`Imported PLY "${file.name}" as "${name}" (${node.plyType})`, 'info');
     this.onSceneChanged?.();
   }
 

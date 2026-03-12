@@ -7,6 +7,7 @@ import { CameraNode } from '../../core/dag/CameraNode';
 import { LightNode } from '../../core/dag/LightNode';
 import { GltfNode } from '../../core/dag/GltfNode';
 import { SplatNode } from '../../core/dag/SplatNode';
+import { PlyNode } from '../../core/dag/PlyNode';
 import type { Command } from '../../core/system/CommandHistory';
 import { TransformCommand } from '../../core/system/commands/TransformCommand';
 import { CAMERA_PRESET_GROUPS, CAMERA_PRESET_MAP } from '../data/cameraPresets';
@@ -495,6 +496,27 @@ const LightSection: React.FC<{ node: LightNode; onChange: () => void }> = ({ nod
     </>
   );
 };
+// ── PLY section ──────────────────────────────────────────────────────────────
+const PlySection: React.FC<{ node: PlyNode; onChange: () => void }> = ({ node, onChange }) => {
+  const [open, setOpen] = useState(true);
+  const [pointSize, setPointSize] = useState(node.pointSize.getValue());
+
+  useEffect(() => {
+    const id = setInterval(() => setPointSize(node.pointSize.getValue()), 80);
+    return () => clearInterval(id);
+  }, [node]);
+
+  return (
+    <>
+      <Sec title="Point Cloud" tag="ply" open={open} onToggle={() => setOpen(v => !v)} accent />
+      {open && (
+        <NumRow label="Point Size" value={pointSize} decimals={4} unit="u" color={C.blue}
+          onChange={v => { const s = Math.max(0.0001, v); setPointSize(s); node.pointSize.setValue(s); onChange(); }} />
+      )}
+    </>
+  );
+};
+
 // ── Splat / Crop Volume section ───────────────────────────────────────────────
 const SPLAT_CROP_PLUGS = new Set(['cropEnabled','cropMinX','cropMinY','cropMinZ','cropMaxX','cropMaxY','cropMaxZ']);
 
@@ -690,6 +712,9 @@ export const AttributeEditorPanel: React.FC = () => {
         {selectedNode instanceof SplatNode && (
           <SplatSection node={selectedNode} onChange={onChange} />
         )}
+        {selectedNode instanceof PlyNode && (
+          <PlySection node={selectedNode} onChange={onChange} />
+        )}
 
         <NodeAttrs
           node={selectedNode}
@@ -701,7 +726,9 @@ export const AttributeEditorPanel: React.FC = () => {
                 ? new Set(['fileName'])
                 : selectedNode instanceof SplatNode
                   ? new Set(['fileName', ...SPLAT_CROP_PLUGS])
-                  : undefined
+                  : selectedNode instanceof PlyNode
+                    ? new Set(['fileName', 'pointSize'])
+                    : undefined
           }
         />
 

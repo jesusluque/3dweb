@@ -88,6 +88,8 @@ export const dispatchScene = {
     sceneBus.dispatchEvent(new CustomEvent('importGltf')),
   importSplat: () =>
     sceneBus.dispatchEvent(new CustomEvent('importSplat')),
+  importPly: () =>
+    sceneBus.dispatchEvent(new CustomEvent('importPly')),
   groupSelected: () =>
     sceneBus.dispatchEvent(new CustomEvent('groupSelected')),
   ungroupSelected: () =>
